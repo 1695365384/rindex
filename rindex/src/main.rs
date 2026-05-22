@@ -2,8 +2,10 @@ use rindex::config::Config;
 use rindex::db::Database;
 use rindex::ignore::{IgnoreConfig, IgnoreEngine};
 use rindex::mcp::{AppState, McpHandler, format_response, parse_request};
+use rindex::watcher;
 use anyhow::Result;
 use std::io::{BufRead, BufReader, Write};
+use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
 fn main() -> Result<()> {
@@ -86,6 +88,18 @@ fn main() -> Result<()> {
         embedder: Mutex::new(None),
         ignore: ignore_arc,
     };
+
+    // Start file watcher for incremental re-indexing
+    let change_rx = watcher::FileWatcher::start(&root_path)
+        .map_err(|e| tracing::warn!("File watcher failed to start: {}", e))
+        .ok();
+    if change_rx.is_some() {
+        tracing::info!("File watcher active, incremental re-indexing enabled");
+    }
+
+    // Create copies for watcher before moving state into handler
+    let watch_db = state.db.clone();
+    let watch_ignore = state.ignore.clone();
     let handler = McpHandler::new(state);
 
     // MCP event loop
@@ -98,6 +112,19 @@ fn main() -> Result<()> {
         let line = line?;
         if line.trim().is_empty() {
             continue;
+        }
+
+        // Drain any file changes before processing the request
+        if let Some(ref rx) = change_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(changes) => {
+                        watcher::process_changes(&changes, &watch_db, &watch_ignore, &root_path);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break,
+                }
+            }
         }
 
         match parse_request(&line) {

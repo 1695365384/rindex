@@ -205,3 +205,12 @@ fn store_embedding(db: &Database, chunk_id: i64, vec: &[f32]) -> Result<()> {
     conn.execute("UPDATE chunks SET embedding = ?1 WHERE id = ?2", rusqlite::params![bytes, chunk_id])?;
     Ok(())
 }
+
+/// Public wrapper for incremental re-indexing of a single file (used by watcher)
+pub fn index_single_file_public(
+    db: &Arc<Mutex<Database>>,
+    embedder: Option<&Embedder>,
+    entry: &crate::indexer::walker::FileEntry,
+) -> Result<()> {
+    index_single_file(db, embedder, entry)
+}
