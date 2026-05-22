@@ -250,10 +250,25 @@ impl McpHandler {
                 let root = &self.state.root_path;
                 let proj = crate::db::queries::get_or_create_project(&db, root)
                     .unwrap_or_default();
+                let indexed_at = proj.indexed_at
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "never".to_string());
+
+                // Check if a reindex is running
+                let reindex_status = if proj.file_count == 0 && proj.chunk_count == 0 {
+                    "pending (first index may be running in background)".to_string()
+                } else {
+                    format!("{} files, {} chunks", proj.file_count, proj.chunk_count)
+                };
+
                 Ok(format!(
-                    "Project: {}\nIndexed files: {}\nTotal chunks: {}\nLast indexed: {}",
-                    root, proj.file_count, proj.chunk_count,
-                    proj.indexed_at.map(|t| t.to_string()).unwrap_or("never".to_string())
+                    "Project: {}\nStatus: {}\nLast indexed: {}\nTotal files: {}\nTotal chunks: {}\nLanguages: Rust, Python, JS, TS, Go, Java, C++, Kotlin, Ruby\nModel: {}",
+                    root, reindex_status, indexed_at, proj.file_count, proj.chunk_count,
+                    if self.state.embedder.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                        "loaded"
+                    } else {
+                        "lazy (loads on first search)"
+                    }
                 ))
             }
             "reindex" => {
@@ -261,20 +276,27 @@ impl McpHandler {
                 let ignore = Arc::clone(&self.state.ignore);
                 let root_path = self.state.root_path.clone();
 
-                // Index without embeddings (they generate lazily on search)
-                let (handle, rx) = crate::indexer::index_project(db, None, ignore, Path::new(&root_path), None);
+                // Spawn non-blocking reindex in background
+                std::thread::Builder::new()
+                    .name("rindex-reindex".into())
+                    .spawn(move || {
+                        tracing::info!("Background reindex started");
+                        let (_handle, rx) = crate::indexer::index_project(
+                            db, None, ignore, Path::new(&root_path), None,
+                        );
+                        // Drain progress channel
+                        while let Ok(progress) = rx.recv() {
+                            tracing::info!("Reindex: {} ({}/{})",
+                                progress.phase, progress.indexed_files, progress.total_files);
+                            if progress.phase == "done" {
+                                break;
+                            }
+                        }
+                        tracing::info!("Background reindex complete");
+                    })
+                    .map_err(|e| format!("Failed to spawn reindex thread: {}", e))?;
 
-                // Wait for completion
-                while let Ok(progress) = rx.recv() {
-                    if progress.phase == "done" {
-                        break;
-                    }
-                }
-
-                handle.join().map_err(|_| "Index thread panicked".to_string())?
-                    .map_err(|e| format!("Index error: {}", e))?;
-
-                Ok("Reindex complete".to_string())
+                Ok("Reindex started in background".to_string())
             }
             "verify" => {
                 let db = Arc::clone(&self.state.db);
