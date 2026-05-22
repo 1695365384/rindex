@@ -1,0 +1,41 @@
+[package]
+name = "rindex"
+version = "0.1.0"
+edition = "2021"
+description = "Local file index MCP server with semantic search"
+
+[dependencies]
+# MCP protocol
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ML (candle)
+candle-core = "0.8"
+candle-nn = "0.8"
+candle-transformers = { version = "0.8", features = ["safetensors"] }
+hf-hub = "0.4"
+tokenizers = "0.21"
+
+# Tree-sitter AST parsing
+tree-sitter = "0.24"
+tree-sitter-rust = "0.22"
+tree-sitter-python = "0.21"
+tree-sitter-javascript = "0.22"
+tree-sitter-typescript = "0.22"
+tree-sitter-go = "0.21"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# File watching
+notify = "7.0"
+
+# Utilities
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
+sha2 = "0.10"
+hex = "0.4"
+glob = "0.3"
+dirs = "6.0"
