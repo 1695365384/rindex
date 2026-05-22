@@ -1,6 +1,5 @@
 use rindex::config::Config;
 use rindex::db::Database;
-use rindex::embedding::Embedder;
 use rindex::ignore::{IgnoreConfig, IgnoreEngine};
 use rindex::mcp::{AppState, McpHandler, format_response, parse_request};
 use anyhow::Result;
@@ -19,9 +18,11 @@ fn main() -> Result<()> {
         .init();
 
     tracing::info!("rindex v{} starting...", env!("CARGO_PKG_VERSION"));
-    let root = &config.project_root;
 
-    tracing::info!("Project root: {:?}", root);
+    let root_path = config.project_root.clone();
+    let root_str = root_path.to_string_lossy().to_string();
+
+    tracing::info!("Project root: {:?}", root_path);
     tracing::info!("Database: {:?}", config.db_path);
 
     // Initialize database
@@ -32,7 +33,7 @@ fn main() -> Result<()> {
     let mut ignore = IgnoreEngine::new(&ignore_cfg);
 
     // Load .gitignore if it exists
-    let gitignore_path = root.join(".gitignore");
+    let gitignore_path = root_path.join(".gitignore");
     if gitignore_path.exists() {
         let content = std::fs::read_to_string(&gitignore_path)?;
         for line in content.lines() {
@@ -41,25 +42,9 @@ fn main() -> Result<()> {
         tracing::info!("Loaded .gitignore patterns");
     }
 
-    // Load embedding model (optional, can be skipped with --no-model)
-    let embedder = if config.no_model {
-        tracing::info!("Embedding model disabled via --no-model");
-        None
-    } else {
-        match Embedder::load(&config.model_cache_dir, &config.model_id) {
-            Ok(model) => {
-                tracing::info!("Embedding model loaded: {}", config.model_id);
-                Some(Arc::new(model))
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load embedding model (text-only search): {}", e);
-                None
-            }
-        }
-    };
+    let config_arc = Arc::new(config);
 
-    // Auto-index if needed
-    let root_str = root.to_string_lossy().to_string();
+    // Auto-index in background (embeddings added lazily on first search)
     let db_arc = Arc::new(Mutex::new(db));
     let ignore_arc = Arc::new(ignore);
 
@@ -67,12 +52,12 @@ fn main() -> Result<()> {
         let db = db_arc.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
         let proj = rindex::db::queries::get_or_create_project(&db, &root_str)?;
         if proj.file_count == 0 {
-            tracing::info!("First time indexing project...");
+            tracing::info!("First time indexing project (text-only, embeddings on demand)...");
             let (_handle, rx) = rindex::indexer::index_project(
                 Arc::clone(&db_arc),
-                embedder.clone(),
+                None, // No embedder at startup — loaded lazily
                 Arc::clone(&ignore_arc),
-                root,
+                &root_path,
             );
 
             std::thread::spawn(move || {
@@ -92,11 +77,12 @@ fn main() -> Result<()> {
         }
     }
 
-    // Create MCP handler
+    // Create MCP handler (embedder loads lazily on first search)
     let state = AppState {
         root_path: root_str,
         db: db_arc,
-        embedder,
+        config: config_arc,
+        embedder: Mutex::new(None),
         ignore: ignore_arc,
     };
     let handler = McpHandler::new(state);

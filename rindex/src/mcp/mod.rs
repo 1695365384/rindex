@@ -69,19 +69,41 @@ pub fn format_response(resp: &McpResponse) -> String {
     serde_json::to_string(resp).unwrap() + "\n"
 }
 
+use crate::config::Config;
 use crate::db::Database;
 use crate::embedding::Embedder;
 use crate::ignore::IgnoreEngine;
 use crate::search::Searcher;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub struct AppState {
     pub root_path: String,
     pub db: Arc<Mutex<Database>>,
-    pub embedder: Option<Arc<Embedder>>,
+    pub config: Arc<Config>,
+    pub embedder: Mutex<Option<Embedder>>,
     pub ignore: Arc<IgnoreEngine>,
+}
+
+impl AppState {
+    /// Get or lazily initialize the embedding model
+    pub fn get_embedder(&self) -> Option<std::sync::MutexGuard<'_, Option<Embedder>>> {
+        let mut guard = self.embedder.lock().unwrap();
+        if guard.is_none() {
+            tracing::info!("Loading embedding model on demand...");
+            match Embedder::load(&self.config.model_cache_dir, &self.config.model_id) {
+                Ok(model) => {
+                    tracing::info!("Embedding model loaded: {}", self.config.model_id);
+                    *guard = Some(model);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load embedding model (text-only search): {}", e);
+                    *guard = None;
+                }
+            }
+        }
+        Some(guard)
+    }
 }
 
 pub struct McpHandler {
@@ -159,7 +181,9 @@ impl McpHandler {
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
                 let db = self.state.db.lock().map_err(|e| format!("Lock error: {}", e))?;
-                let searcher = Searcher::new(&db, self.state.embedder.as_deref());
+                let embedder_guard = self.state.get_embedder();
+                let embedder_ref = embedder_guard.as_ref().and_then(|o| o.as_ref());
+                let searcher = Searcher::new(&db, embedder_ref);
                 let results = searcher.semantic_search(query, limit)
                     .map_err(|e| format!("Search error: {}", e))?;
                 serde_json::to_string_pretty(&results)
@@ -170,7 +194,7 @@ impl McpHandler {
                 let chunk_type = args.get("chunk_type").and_then(|v| v.as_str());
 
                 let db = self.state.db.lock().map_err(|e| format!("Lock error: {}", e))?;
-                let searcher = Searcher::new(&db, self.state.embedder.as_deref());
+                let searcher = Searcher::new(&db, None);
                 let results = searcher.search_symbol(name, chunk_type)
                     .map_err(|e| format!("Search error: {}", e))?;
                 serde_json::to_string_pretty(&results)
@@ -189,12 +213,11 @@ impl McpHandler {
             }
             "reindex" => {
                 let db = Arc::clone(&self.state.db);
-                let embedder = self.state.embedder.clone();
                 let ignore = Arc::clone(&self.state.ignore);
                 let root_path = self.state.root_path.clone();
 
-                // Start indexing in background thread
-                let (handle, rx) = crate::indexer::index_project(db, embedder, ignore, Path::new(&root_path));
+                // Index without embeddings (they generate lazily on search)
+                let (handle, rx) = crate::indexer::index_project(db, None, ignore, Path::new(&root_path));
 
                 // Wait for completion
                 while let Ok(progress) = rx.recv() {
