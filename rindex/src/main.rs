@@ -54,6 +54,17 @@ fn main() -> Result<()> {
         tracing::info!("Loaded .gitignore patterns");
     }
 
+    // Load .llm-index-ignore if it exists (takes priority over .gitignore)
+    let llm_ignore_path = root_path.join(".llm-index-ignore");
+    if llm_ignore_path.exists() {
+        let content = std::fs::read_to_string(&llm_ignore_path)
+        .with_context(|| format!("Failed to read {:?}", llm_ignore_path))?;
+        for line in content.lines() {
+            ignore.add_gitignore_pattern(line);
+        }
+        tracing::info!("Loaded .llm-index-ignore patterns (override)");
+    }
+
     let config_arc = Arc::new(config);
 
     // Auto-index in background (embeddings added lazily on first search)
