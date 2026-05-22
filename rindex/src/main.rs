@@ -8,6 +8,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex};
 
 fn main() -> Result<()> {
+    // Parse CLI before initializing tracing (so --help and --version don't log)
+    let config = Config::load()?;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -15,14 +18,14 @@ fn main() -> Result<()> {
         )
         .init();
 
-    tracing::info!("rindex starting...");
+    tracing::info!("rindex v{} starting...", env!("CARGO_PKG_VERSION"));
+    let root = &config.project_root;
 
-    let root = std::env::current_dir()?;
-    let config = Config::from_project_root(&root);
+    tracing::info!("Project root: {:?}", root);
+    tracing::info!("Database: {:?}", config.db_path);
 
     // Initialize database
     let db = Database::open(&config.db_path)?;
-    tracing::info!("Database initialized at {:?}", config.db_path);
 
     // Setup ignore engine
     let ignore_cfg = IgnoreConfig { max_file_size: config.max_file_size };
@@ -38,15 +41,20 @@ fn main() -> Result<()> {
         tracing::info!("Loaded .gitignore patterns");
     }
 
-    // Load embedding model (optional, non-fatal if fails)
-    let embedder = match Embedder::load(&config.model_cache_dir, &config.model_id) {
-        Ok(model) => {
-            tracing::info!("Embedding model loaded: {}", config.model_id);
-            Some(Arc::new(model))
-        }
-        Err(e) => {
-            tracing::warn!("Failed to load embedding model (text-only search): {}", e);
-            None
+    // Load embedding model (optional, can be skipped with --no-model)
+    let embedder = if config.no_model {
+        tracing::info!("Embedding model disabled via --no-model");
+        None
+    } else {
+        match Embedder::load(&config.model_cache_dir, &config.model_id) {
+            Ok(model) => {
+                tracing::info!("Embedding model loaded: {}", config.model_id);
+                Some(Arc::new(model))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load embedding model (text-only search): {}", e);
+                None
+            }
         }
     };
 
@@ -64,7 +72,7 @@ fn main() -> Result<()> {
                 Arc::clone(&db_arc),
                 embedder.clone(),
                 Arc::clone(&ignore_arc),
-                &root,
+                root,
             );
 
             std::thread::spawn(move || {
