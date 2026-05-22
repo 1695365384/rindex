@@ -66,7 +66,7 @@ pub fn parse_request(line: &str) -> Result<McpRequest> {
 }
 
 pub fn format_response(resp: &McpResponse) -> String {
-    serde_json::to_string(resp).unwrap() + "\n"
+    serde_json::to_string(resp).expect("MCP response serialization should not fail") + "\n"
 }
 
 use crate::config::Config;

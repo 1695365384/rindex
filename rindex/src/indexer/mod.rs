@@ -85,7 +85,7 @@ pub fn index_project(
         state.running.store(true, Ordering::Release);
 
         // Phase 1: Scan files
-        *state.phase.lock().unwrap() = "scanning".to_string();
+        *state.phase.lock().unwrap_or_else(|e| e.into_inner()) = "scanning".to_string();
         tx.send(IndexProgress { total_files: 0, indexed_files: 0, total_chunks: 0, phase: "scanning".to_string() }).ok();
 
         let walker = FileWalker::new(&ignore);
@@ -93,7 +93,7 @@ pub fn index_project(
         let total = files.len();
         state.total.store(total, Ordering::Release);
 
-        *state.phase.lock().unwrap() = "indexing".to_string();
+        *state.phase.lock().unwrap_or_else(|e| e.into_inner()) = "indexing".to_string();
         tx.send(IndexProgress { total_files: total, indexed_files: 0, total_chunks: 0, phase: "indexing".to_string() }).ok();
 
         // Phase 2: Progressive batch indexing
@@ -127,7 +127,7 @@ pub fn index_project(
         queries::update_project_stats(&db_guard, &root_str, total as i64, chunk_count_final as i64)?;
         drop(db_guard);
 
-        *state.phase.lock().unwrap() = "done".to_string();
+        *state.phase.lock().unwrap_or_else(|e| e.into_inner()) = "done".to_string();
         state.running.store(false, Ordering::Release);
         tx.send(IndexProgress {
             total_files: total, indexed_files: total, total_chunks: chunk_count_final,

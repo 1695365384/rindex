@@ -104,7 +104,7 @@ pub fn get_or_create_project(db: &Database, root_path: &str) -> Result<ProjectRe
 
 pub fn update_project_stats(db: &Database, root_path: &str, file_count: i64, chunk_count: i64) -> Result<()> {
     let conn = db.conn()?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
     conn.execute(
         "INSERT INTO project (root_path, file_count, chunk_count, indexed_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(root_path) DO UPDATE SET file_count=excluded.file_count, chunk_count=excluded.chunk_count, indexed_at=excluded.indexed_at",
         params![root_path, file_count, chunk_count, now],

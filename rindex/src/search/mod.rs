@@ -28,50 +28,46 @@ impl<'a> Searcher<'a> {
         let conn = self.db.conn()?;
         let pattern = format!("%{}%", name);
 
-        let mut stmt = if let Some(_ctype) = chunk_type {
-            conn.prepare(
+        let rows: Vec<SearchResult> = if let Some(ctype) = chunk_type {
+            let mut stmt = conn.prepare(
                 "SELECT file_path, chunk_type, name, start_line, end_line, content
                  FROM chunks WHERE name LIKE ?1 AND chunk_type = ?2
-                 ORDER BY name LIMIT 20"
-            )?
+                 ORDER BY
+                   CASE WHEN name = ?3 THEN 0 ELSE 1 END,
+                   LENGTH(name),
+                   name
+                 LIMIT 20"
+            )?;
+            let rows: Vec<SearchResult> = stmt.query_map(
+                rusqlite::params![pattern, ctype, name],
+                |row| Ok(SearchResult {
+                    file_path: row.get(0)?, chunk_type: row.get(1)?,
+                    name: row.get(2)?, start_line: row.get(3)?,
+                    end_line: row.get(4)?, snippet: row.get(5)?,
+                    score: 1.0,
+                })
+            )?.filter_map(|r| r.ok()).collect();
+            rows
         } else {
-            conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT file_path, chunk_type, name, start_line, end_line, content
                  FROM chunks WHERE name LIKE ?1
-                 ORDER BY name LIMIT 20"
-            )?
-        };
-
-        let rows = if let Some(ctype) = chunk_type {
-            let rows = stmt.query_map(rusqlite::params![pattern, ctype], |row| {
-                Ok(SearchResult {
-                    file_path: row.get(0)?,
-                    chunk_type: row.get(1)?,
-                    name: row.get(2)?,
-                    start_line: row.get(3)?,
-                    end_line: row.get(4)?,
-                    snippet: row.get(5)?,
+                 ORDER BY
+                   CASE WHEN name = ?2 THEN 0 ELSE 1 END,
+                   LENGTH(name),
+                   name
+                 LIMIT 20"
+            )?;
+            let rows: Vec<SearchResult> = stmt.query_map(
+                rusqlite::params![pattern, name],
+                |row| Ok(SearchResult {
+                    file_path: row.get(0)?, chunk_type: row.get(1)?,
+                    name: row.get(2)?, start_line: row.get(3)?,
+                    end_line: row.get(4)?, snippet: row.get(5)?,
                     score: 1.0,
                 })
-            })?;
-            let mut results = Vec::new();
-            for row in rows { results.push(row?); }
-            results
-        } else {
-            let rows = stmt.query_map(rusqlite::params![pattern], |row| {
-                Ok(SearchResult {
-                    file_path: row.get(0)?,
-                    chunk_type: row.get(1)?,
-                    name: row.get(2)?,
-                    start_line: row.get(3)?,
-                    end_line: row.get(4)?,
-                    snippet: row.get(5)?,
-                    score: 1.0,
-                })
-            })?;
-            let mut results = Vec::new();
-            for row in rows { results.push(row?); }
-            results
+            )?.filter_map(|r| r.ok()).collect();
+            rows
         };
 
         Ok(rows)
