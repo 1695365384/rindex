@@ -25,7 +25,7 @@ impl<'a> Searcher<'a> {
 
     /// Search by symbol name (LIKE query)
     pub fn search_symbol(&self, name: &str, chunk_type: Option<&str>) -> Result<Vec<SearchResult>> {
-        let conn = self.db.conn.lock().unwrap();
+        let conn = self.db.conn()?;
         let pattern = format!("%{}%", name);
 
         let mut stmt = if let Some(_ctype) = chunk_type {
@@ -84,7 +84,7 @@ impl<'a> Searcher<'a> {
             None => return self.search_symbol(query, None),
         };
 
-        let conn = self.db.conn.lock().unwrap();
+        let conn = self.db.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, file_path, chunk_type, name, start_line, end_line, content, embedding
              FROM chunks WHERE embedding IS NOT NULL"

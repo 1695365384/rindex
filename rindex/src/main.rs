@@ -64,7 +64,7 @@ fn main() -> Result<()> {
     let ignore_arc = Arc::new(ignore);
 
     {
-        let db = db_arc.lock().unwrap();
+        let db = db_arc.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
         let proj = rindex::db::queries::get_or_create_project(&db, &root_str)?;
         if proj.file_count == 0 {
             tracing::info!("First time indexing project...");

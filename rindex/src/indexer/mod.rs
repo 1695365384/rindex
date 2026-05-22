@@ -56,19 +56,24 @@ pub fn index_project(
             }
             indexed += 1;
             if indexed % 5 == 0 {
-                let chunk_count = db.lock().unwrap().conn.lock().unwrap()
-                    .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get::<_, i64>(0))
+                let chunk_count = db.lock()
+                    .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
+                    .conn()
+                    .map(|c| c.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get::<_, i64>(0)).unwrap_or(0))
                     .unwrap_or(0) as usize;
                 tx.send(IndexProgress { total_files: total, indexed_files: indexed, total_chunks: chunk_count, phase: "indexing".to_string() }).ok();
             }
         }
 
         // Update project stats
-        let chunk_count_final = db.lock().unwrap().conn.lock().unwrap()
-            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get::<_, i64>(0))
+        let chunk_count_final = db.lock()
+            .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
+            .conn()
+            .map(|c| c.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get::<_, i64>(0)).unwrap_or(0))
             .unwrap_or(0) as usize;
         let root_str = root_path.to_string_lossy().to_string();
-        queries::update_project_stats(&db.lock().unwrap(), &root_str, total as i64, chunk_count_final as i64)?;
+        let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+        queries::update_project_stats(&db_guard, &root_str, total as i64, chunk_count_final as i64)?;
 
         tx.send(IndexProgress { total_files: total, indexed_files: total, total_chunks: chunk_count_final, phase: "done".to_string() }).ok();
         Ok(())
@@ -81,9 +86,9 @@ fn index_single_file(db: &Arc<Mutex<Database>>, embedder: Option<&Embedder>, ent
     let content = std::fs::read_to_string(&entry.path)?;
     let hash = compute_hash(&content);
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
 
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
 
     // Check if file changed
     if let Some(existing) = queries::get_file(&db_guard, &entry.relative_path)? {
@@ -122,7 +127,7 @@ fn index_single_file(db: &Arc<Mutex<Database>>, embedder: Option<&Embedder>, ent
 }
 
 fn store_embedding(db: &Database, chunk_id: i64, vec: &[f32]) -> Result<()> {
-    let conn = db.conn.lock().unwrap();
+    let conn = db.conn()?;
     let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
     conn.execute("UPDATE chunks SET embedding = ?1 WHERE id = ?2", rusqlite::params![bytes, chunk_id])?;
     Ok(())
