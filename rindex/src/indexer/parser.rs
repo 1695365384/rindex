@@ -12,11 +12,12 @@ pub struct Symbol {
 
 pub fn get_language(name: &str) -> Option<Language> {
     match name {
-        "rust" => Some(tree_sitter_rust::language()),
-        "python" => Some(tree_sitter_python::language()),
-        "javascript" | "js" | "jsx" => Some(tree_sitter_javascript::language()),
-        "typescript" | "ts" | "tsx" => Some(tree_sitter_typescript::language()),
-        "go" => Some(tree_sitter_go::language()),
+        "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
+        "python" => Some(tree_sitter_python::LANGUAGE.into()),
+        "javascript" | "js" | "jsx" => Some(tree_sitter_javascript::LANGUAGE.into()),
+        "typescript" | "ts" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -52,7 +53,7 @@ fn extract_symbols(node: tree_sitter::Node, source: &str, symbols: &mut Vec<Symb
                 | "mod_item"
         ),
         "python" => matches!(kind, "function_definition" | "class_definition"),
-        "javascript" | "typescript" => matches!(
+        "javascript" | "typescript" | "tsx" => matches!(
             kind,
             "function_declaration"
                 | "class_declaration"
