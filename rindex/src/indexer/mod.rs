@@ -8,7 +8,7 @@ use crate::embedding::Embedder;
 use crate::ignore::IgnoreEngine;
 use crate::indexer::chunker::chunk_file;
 use crate::indexer::walker::FileWalker;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -154,7 +154,8 @@ fn count_chunks(db: &Arc<Mutex<Database>>) -> usize {
 }
 
 fn index_single_file(db: &Arc<Mutex<Database>>, embedder: Option<&Embedder>, entry: &crate::indexer::walker::FileEntry) -> Result<()> {
-    let content = std::fs::read_to_string(&entry.path)?;
+    let content = std::fs::read_to_string(&entry.path)
+        .with_context(|| format!("Failed to read {:?}", entry.path))?;
     let hash = compute_hash(&content);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
@@ -203,6 +204,46 @@ fn store_embedding(db: &Database, chunk_id: i64, vec: &[f32]) -> Result<()> {
     let conn = db.conn()?;
     let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
     conn.execute("UPDATE chunks SET embedding = ?1 WHERE id = ?2", rusqlite::params![bytes, chunk_id])?;
+    Ok(())
+}
+
+/// Backfill embeddings for all chunks that don't have them yet.
+/// Called after the model loads lazily to fill in gaps from the initial text-only index.
+pub fn backfill_embeddings(db: &Arc<Mutex<Database>>, embedder: &Embedder) -> Result<()> {
+    let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+    let conn = db_guard.conn()?;
+
+    // Find all chunks without embeddings
+    let mut stmt = conn.prepare(
+        "SELECT id, content, name FROM chunks WHERE embedding IS NULL ORDER BY id"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let id: i64 = row.get(0)?;
+        let content: String = row.get(1)?;
+        let name: Option<String> = row.get(2)?;
+        Ok((id, content, name))
+    })?;
+
+    let mut count = 0;
+    for row in rows {
+        let (id, content, name) = row?;
+        let text = name.as_ref()
+            .map(|n| format!("{}: {}", n, content))
+            .unwrap_or(content);
+        match embedder.embed(&text) {
+            Ok(vec) => {
+                let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
+                conn.execute("UPDATE chunks SET embedding = ?1 WHERE id = ?2",
+                    rusqlite::params![bytes, id])?;
+                count += 1;
+            }
+            Err(e) => tracing::warn!("Embedding backfill failed for chunk {}: {}", id, e),
+        }
+    }
+
+    if count > 0 {
+        tracing::info!("Backfilled embeddings for {} chunks", count);
+    }
     Ok(())
 }
 

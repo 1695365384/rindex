@@ -3,19 +3,21 @@ use rindex::db::Database;
 use rindex::ignore::{IgnoreConfig, IgnoreEngine};
 use rindex::mcp::{AppState, McpHandler, format_response, parse_request};
 use rindex::watcher;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
 fn main() -> Result<()> {
     // Parse CLI before initializing tracing (so --help and --version don't log)
-    let config = Config::load()?;
+    let config = Config::load()
+        .context("Failed to load configuration")?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("rindex=info".parse()?)
+                .add_directive("rindex=info".parse()
+                    .context("Invalid tracing filter directive")?)
         )
         .init();
 
@@ -37,7 +39,8 @@ fn main() -> Result<()> {
     // Load .gitignore if it exists
     let gitignore_path = root_path.join(".gitignore");
     if gitignore_path.exists() {
-        let content = std::fs::read_to_string(&gitignore_path)?;
+        let content = std::fs::read_to_string(&gitignore_path)
+        .with_context(|| format!("Failed to read {:?}", gitignore_path))?;
         for line in content.lines() {
             ignore.add_gitignore_pattern(line);
         }

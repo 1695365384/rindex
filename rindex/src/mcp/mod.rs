@@ -87,19 +87,35 @@ pub struct AppState {
 
 impl AppState {
     /// Get or lazily initialize the embedding model
+    /// After loading, spawns background backfill for chunks without embeddings
     pub fn get_embedder(&self) -> Option<std::sync::MutexGuard<'_, Option<Embedder>>> {
-        let mut guard = self.embedder.lock().unwrap();
-        if guard.is_none() {
-            tracing::info!("Loading embedding model on demand...");
-            match Embedder::load(&self.config.model_cache_dir, &self.config.model_id) {
-                Ok(model) => {
-                    tracing::info!("Embedding model loaded: {}", self.config.model_id);
-                    *guard = Some(model);
+        let mut guard = self.embedder.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            return Some(guard);
+        }
+
+        tracing::info!("Loading embedding model on demand...");
+        match Embedder::load(&self.config.model_cache_dir, &self.config.model_id) {
+            Ok(model) => {
+                tracing::info!("Embedding model loaded: {}", self.config.model_id);
+                *guard = Some(model);
+
+                // Backfill embeddings for existing chunks in background
+                let db = Arc::clone(&self.db);
+                let embedder_ref = match &*guard {
+                    Some(e) => e, // borrow from guard — OK since we hold the lock
+                    None => return None,
+                };
+                tracing::info!("Backfilling embeddings for existing chunks...");
+                let result = crate::indexer::backfill_embeddings(&db, embedder_ref);
+                match result {
+                    Ok(()) => tracing::info!("Embedding backfill complete"),
+                    Err(e) => tracing::warn!("Embedding backfill failed: {}", e),
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to load embedding model (text-only search): {}", e);
-                    *guard = None;
-                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load embedding model (text-only search): {}", e);
+                *guard = None;
             }
         }
         Some(guard)
