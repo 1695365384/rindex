@@ -1,8 +1,9 @@
 [package]
 name = "rindex"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Local file index MCP server with semantic search"
+rust-version = "1.75"
+description = "Local file index MCP server with semantic search for Claude Code"
 
 [dependencies]
 # MCP protocol
@@ -25,7 +26,7 @@ tree-sitter-typescript = ">=0.20, <1"
 tree-sitter-go = ">=0.20, <1"
 
 # Storage
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
 
 # File watching
 notify = "7.0"

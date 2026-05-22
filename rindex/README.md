@@ -11,45 +11,45 @@ A Rust-based MCP server that indexes project files using semantic search, so Cla
 - **Zero API calls** — Runs 100% locally with CPU-only inference
 - **Multi-language** — Supports Rust, Python, JavaScript, TypeScript, Go, and more
 
-## Installation
-
-### 1. Build
+## Quick Start
 
 ```bash
-cd rindex
+# Build
 cargo build --release
-```
 
-### 2. Install the binary
-
-Copy `target/release/rindex` to a directory in your PATH:
-
-```bash
-# On Linux/macOS
+# Install
 cp target/release/rindex ~/.local/bin/
 
-# On Windows
-# copy target/release/rindex.exe %USERPROFILE%\.cargo\bin\
+# Claude Code will auto-index your project on first open
 ```
 
-### 3. Configure Claude Code
+## CLI Options
 
-Add to your `claude.json` (usually at `~/.claude/claude.json` or project root):
+```
+rindex [OPTIONS]
 
-```json
-{
-  "mcpServers": {
-    "rindex": {
-      "command": "rindex",
-      "args": []
-    }
-  }
-}
+  -p, --path <PATH>        Project root (default: current dir)
+      --db <PATH>          Database location (default: ~/.local/share/rindex/rindex.db)
+      --config <FILE>      Config file (rindex.toml)
+      --no-model           Skip embedding model (text-only search)
+      --max-size <BYTES>   Max file size to index (default: 1MB)
+      --model-id <ID>      Embedding model (default: BAAI/bge-small-en-v1.5)
 ```
 
-### 4. Restart Claude Code
+## Config File (`rindex.toml`)
 
-rindex will automatically index your project on first open.
+```toml
+max_file_size = 2097152
+model_id = "BAAI/bge-small-en-v1.5"
+default_search_limit = 20
+watcher_debounce_ms = 500
+```
+
+## Logging
+
+- Default: human-readable stderr
+- `RINDEX_LOG_FORMAT=json` — JSON structured logs (production)
+- `RUST_LOG=rindex=debug` — verbose logging
 
 ## Available Tools
 
