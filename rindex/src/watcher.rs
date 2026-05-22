@@ -1,6 +1,6 @@
 use crate::db::Database;
 use crate::ignore::{IgnoreConfig, IgnoreEngine};
-use crate::indexer::walker::FileEntry;
+use crate::indexer::walker::{FileEntry, FileWalker};
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
@@ -87,12 +87,14 @@ pub fn process_changes(
             Err(_) => continue,
         };
 
-        // Detect .gitignore changes — reload ignore rules and rescan
+        // Detect .gitignore changes — reload rules and rescan project
         if relative == ".gitignore" || relative.ends_with("/.gitignore") {
-            tracing::info!(".gitignore changed, reloading ignore rules");
-            *ignore = rebuild_ignore_engine(root);
+            tracing::info!(".gitignore changed, reloading rules and rescanning");
+            let new_ignore = rebuild_ignore_engine(root);
+            rescan_against_new_rules(db, root, ignore, &new_ignore);
+            *ignore = new_ignore;
             ignore_reloaded = true;
-            continue; // reindex loop handles the rescan below
+            continue;
         }
 
         // Check if file still exists — if deleted, remove from index
@@ -141,6 +143,54 @@ pub fn process_changes(
     }
 
     ignore_reloaded
+}
+
+/// After .gitignore changes, remove newly-ignored files and index newly-included files
+fn rescan_against_new_rules(
+    db: &Arc<Mutex<Database>>,
+    root: &Path,
+    old_ignore: &IgnoreEngine,
+    new_ignore: &IgnoreEngine,
+) {
+    let walker = FileWalker::new(new_ignore);
+    let old_walker = FileWalker::new(old_ignore);
+
+    let new_files = match walker.walk(root) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let old_files = match old_walker.walk(root) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    let new_set: std::collections::HashSet<String> = new_files.iter().map(|f| f.relative_path.clone()).collect();
+    let old_set: std::collections::HashSet<String> = old_files.iter().map(|f| f.relative_path.clone()).collect();
+
+    // Remove files that are no longer wanted
+    let db_guard = match db.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    for path in &old_set {
+        if !new_set.contains(path.as_str()) {
+            let _ = crate::db::queries::delete_file(&db_guard, path);
+            tracing::debug!("Removed from index per new .gitignore: {}", path);
+        }
+    }
+    drop(db_guard);
+
+    // Index newly included files
+    for entry in &new_files {
+        if !old_set.contains(&entry.relative_path) {
+            tracing::debug!("Indexing new file per .gitignore change: {}", entry.relative_path);
+            let _ = crate::indexer::index_single_file_public(db, None, entry);
+        }
+    }
+
+    tracing::info!("Rescan complete: {} removed, {} added",
+        old_set.difference(&new_set).count(),
+        new_set.difference(&old_set).count());
 }
 
 /// Rebuild the ignore engine from .gitignore files in the project

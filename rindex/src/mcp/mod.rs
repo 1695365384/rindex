@@ -40,13 +40,22 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "search".to_string(),
-            description: "Semantically search project code, returning results with file paths and line numbers. More efficient than Glob/Grep.".to_string(),
-            input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"Search query"},"limit":{"type":"number","description":"Max results (default 10)","default":10}},"required":["query"]}),
+            description: "Semantically search project code, returning results grouped by file with line numbers. More efficient than Glob/Grep.".to_string(),
+            input_schema: serde_json::json!({"type":"object","properties":{
+                "query":{"type":"string","description":"Search query"},
+                "limit":{"type":"number","description":"Max results (default 10)","default":10},
+                "type":{"type":"string","description":"Filter by file type: rs, py, js, ts, go, java, rs, cpp, kt, rb, etc."},
+                "path":{"type":"string","description":"Filter by file path pattern (e.g. src/, tests/)"}
+            },"required":["query"]}),
         },
         ToolDefinition {
             name: "search_symbol".to_string(),
             description: "Search for a symbol by exact name (function, class, etc.)".to_string(),
-            input_schema: serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"Symbol name"},"chunk_type":{"type":"string","description":"Filter by type"}},"required":["name"]}),
+            input_schema: serde_json::json!({"type":"object","properties":{
+                "name":{"type":"string","description":"Symbol name"},
+                "chunk_type":{"type":"string","description":"Filter by type: function, class, interface, etc."},
+                "type":{"type":"string","description":"Filter by file type: rs, py, js, ts, go, java, etc."}
+            },"required":["name"]}),
         },
         ToolDefinition {
             name: "project_status".to_string(),
@@ -200,13 +209,22 @@ impl McpHandler {
             "search" => {
                 let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                let filter_type = args.get("type").and_then(|v| v.as_str());
+                let filter_path = args.get("path").and_then(|v| v.as_str());
 
                 let db = self.state.db.lock().map_err(|e| format!("Lock error: {}", e))?;
                 let embedder_guard = self.state.get_embedder();
                 let embedder_ref = embedder_guard.as_ref().and_then(|o| o.as_ref());
                 let searcher = Searcher::new(&db, embedder_ref);
-                let results = searcher.semantic_search(query, limit)
+                let mut results = searcher.semantic_search(query, limit)
                     .map_err(|e| format!("Search error: {}", e))?;
+                // Apply filters
+                if let Some(ft) = filter_type {
+                    results.retain(|r| r.file_path.ends_with(&format!(".{}", ft)));
+                }
+                if let Some(fp) = filter_path {
+                    results.retain(|r| r.file_path.contains(fp));
+                }
                 let grouped = crate::search::group_by_file(results);
                 serde_json::to_string_pretty(&grouped)
                     .map_err(|e| format!("Serialize error: {}", e))
@@ -214,11 +232,15 @@ impl McpHandler {
             "search_symbol" => {
                 let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let chunk_type = args.get("chunk_type").and_then(|v| v.as_str());
+                let filter_type = args.get("type").and_then(|v| v.as_str());
 
                 let db = self.state.db.lock().map_err(|e| format!("Lock error: {}", e))?;
                 let searcher = Searcher::new(&db, None);
-                let results = searcher.search_symbol(name, chunk_type)
+                let mut results = searcher.search_symbol(name, chunk_type)
                     .map_err(|e| format!("Search error: {}", e))?;
+                if let Some(ft) = filter_type {
+                    results.retain(|r| r.file_path.ends_with(&format!(".{}", ft)));
+                }
                 let grouped = crate::search::group_by_file(results);
                 serde_json::to_string_pretty(&grouped)
                     .map_err(|e| format!("Serialize error: {}", e))
