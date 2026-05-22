@@ -13,13 +13,20 @@ fn main() -> Result<()> {
     let config = Config::load()
         .context("Failed to load configuration")?;
 
-    tracing_subscriber::fmt()
+    // Configure logging: JSON format for production, human-readable for dev
+    let log_format = std::env::var("RINDEX_LOG_FORMAT").unwrap_or_default();
+    let subscriber = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("rindex=info".parse()
                     .context("Invalid tracing filter directive")?)
-        )
-        .init();
+        );
+    if log_format == "json" {
+        subscriber.json().init();
+        tracing::info!("JSON logging enabled via RINDEX_LOG_FORMAT=json");
+    } else {
+        subscriber.init();
+    }
 
     tracing::info!("rindex v{} starting...", env!("CARGO_PKG_VERSION"));
 

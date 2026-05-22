@@ -33,7 +33,7 @@ notify = "7.0"
 # Utilities
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 walkdir = "2"
 sha2 = "0.10"
 hex = "0.4"

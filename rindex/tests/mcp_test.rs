@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use rindex::mcp::{McpRequest, McpResponse, parse_request, format_response, get_tool_definitions};
+    use rindex::mcp::{McpRequest, parse_request, get_tool_definitions};
 
     #[test]
     fn test_parse_initialize_request() {
