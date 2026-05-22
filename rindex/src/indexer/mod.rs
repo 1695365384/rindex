@@ -9,6 +9,7 @@ use crate::ignore::IgnoreEngine;
 use crate::indexer::chunker::chunk_file;
 use crate::indexer::walker::FileWalker;
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,11 +18,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-/// Number of files to index before yielding to other threads
-const BATCH_SIZE: usize = 10;
+/// Number of files per parallel batch
+const BATCH_SIZE: usize = 20;
 
 /// Pause between batches to let the MCP event loop process requests
-const BATCH_YIELD_MS: u64 = 5;
+const BATCH_YIELD_MS: u64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct IndexProgress {
@@ -96,19 +97,20 @@ pub fn index_project(
         *state.phase.lock().unwrap_or_else(|e| e.into_inner()) = "indexing".to_string();
         tx.send(IndexProgress { total_files: total, indexed_files: 0, total_chunks: 0, phase: "indexing".to_string() }).ok();
 
-        // Phase 2: Progressive batch indexing
+        // Phase 2: Progressive parallel batch indexing
         let mut indexed = 0;
         for batch in files.chunks(BATCH_SIZE) {
             // Yield between batches so MCP loop can process requests
             thread::sleep(Duration::from_millis(BATCH_YIELD_MS));
 
-            for entry in batch {
+            // Process files in parallel within each batch
+            batch.par_iter().for_each(|entry| {
                 if let Err(e) = index_single_file(&db, embedder.as_deref(), entry) {
                     tracing::warn!("Failed to index {}: {}", entry.relative_path, e);
                 }
-                indexed += 1;
-                state.indexed.store(indexed, Ordering::Release);
-            }
+            });
+            indexed += batch.len();
+            state.indexed.store(indexed, Ordering::Release);
 
             // Update chunk count and report progress
             let chunk_count = count_chunks(&db);

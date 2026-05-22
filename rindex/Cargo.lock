@@ -2477,6 +2477,7 @@ dependencies = [
  "lru",
  "notify",
  "once_cell",
+ "rayon",
  "rusqlite",
  "serde",
  "serde_json",
