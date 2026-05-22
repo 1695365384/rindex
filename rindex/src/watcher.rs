@@ -66,7 +66,7 @@ impl FileWatcher {
     }
 }
 
-/// Process a batch of changed files: re-index each file incrementally
+/// Process a batch of changed files: re-index or remove from index
 pub fn process_changes(
     changes: &[PathBuf],
     db: &Arc<Mutex<Database>>,
@@ -83,12 +83,27 @@ pub fn process_changes(
             Err(_) => continue,
         };
 
+        // Check if file still exists — if deleted, remove from index
+        if !path.exists() {
+            tracing::debug!("File deleted, removing from index: {}", relative);
+            let db_guard = match db.lock() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let _ = crate::db::queries::delete_file(&db_guard, &relative);
+            continue;
+        }
+
         // Check if this file should be indexed
         let ext = path.extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let size = metadata.len();
 
         if !ignore.should_index(&relative, size, &ext) {
             continue;
@@ -101,8 +116,7 @@ pub fn process_changes(
             path: path.to_path_buf(),
             relative_path: relative.clone(),
             size,
-            mtime: std::fs::metadata(path)
-                .and_then(|m| m.modified())
+            mtime: metadata.modified()
                 .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
                 .unwrap_or(0),
             language,
