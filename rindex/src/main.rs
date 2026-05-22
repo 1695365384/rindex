@@ -60,8 +60,7 @@ fn main() -> Result<()> {
         let proj = rindex::db::queries::get_or_create_project(&db, &root_str)?;
         if proj.file_count == 0 {
             tracing::info!("First time indexing project...");
-            let (_tx, _rx) = std::sync::mpsc::channel::<rindex::indexer::IndexProgress>();
-            let (_handle, _rx) = rindex::indexer::index_project(
+            let (_handle, rx) = rindex::indexer::index_project(
                 Arc::clone(&db_arc),
                 embedder.clone(),
                 Arc::clone(&ignore_arc),
@@ -69,7 +68,7 @@ fn main() -> Result<()> {
             );
 
             std::thread::spawn(move || {
-                while let Ok(progress) = _rx.recv() {
+                while let Ok(progress) = rx.recv() {
                     match progress.phase.as_str() {
                         "scanning" => tracing::info!("Scanning project files..."),
                         "indexing" => tracing::info!("Indexing: {}/{} files, {} chunks",
