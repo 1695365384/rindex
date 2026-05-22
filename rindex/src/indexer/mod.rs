@@ -247,6 +247,43 @@ pub fn backfill_embeddings(db: &Arc<Mutex<Database>>, embedder: &Embedder) -> Re
     Ok(())
 }
 
+/// Verify index integrity: remove stale entries, count mismatches.
+/// Returns (files_removed, files_missing_from_index, total_checked).
+pub fn verify_index(
+    db: &Arc<Mutex<Database>>,
+    ignore: &IgnoreEngine,
+    root: &Path,
+) -> Result<(usize, usize, usize)> {
+    let root_path = root.to_path_buf();
+    let walker = FileWalker::new(ignore);
+
+    // Get all indexed files
+    let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+    let indexed = queries::get_all_files(&db_guard)?;
+    let indexed_paths: std::collections::HashSet<String> = indexed.iter().map(|f| f.path.clone()).collect();
+    drop(db_guard);
+
+    // Scan actual files on disk
+    let actual_files = walker.walk(&root_path)?;
+    let actual_paths: std::collections::HashSet<String> = actual_files.iter().map(|f| f.relative_path.clone()).collect();
+
+    // Remove stale entries (indexed but not on disk)
+    let mut removed = 0;
+    for path in &indexed_paths {
+        if !actual_paths.contains(path.as_str()) {
+            let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+            if queries::delete_file(&db_guard, path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+
+    // Count missing (on disk but not indexed)
+    let missing = actual_paths.difference(&indexed_paths).count();
+
+    Ok((removed, missing, indexed_paths.len()))
+}
+
 /// Public wrapper for incremental re-indexing of a single file (used by watcher)
 pub fn index_single_file_public(
     db: &Arc<Mutex<Database>>,

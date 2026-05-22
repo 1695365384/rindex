@@ -109,7 +109,7 @@ fn main() -> Result<()> {
 
     // Create copies for watcher before moving state into handler
     let watch_db = state.db.clone();
-    let watch_ignore = state.ignore.clone();
+    let watch_ignore = Arc::new(Mutex::new((*state.ignore).clone()));
     let handler = McpHandler::new(state);
 
     // MCP event loop
@@ -129,7 +129,9 @@ fn main() -> Result<()> {
             loop {
                 match rx.try_recv() {
                     Ok(changes) => {
-                        watcher::process_changes(&changes, &watch_db, &watch_ignore, &root_path);
+                        if watcher::process_changes(&changes, &watch_db, &mut *watch_ignore.lock().unwrap(), &root_path) {
+                            tracing::info!("Ignore rules reloaded from .gitignore change");
+                        }
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break,

@@ -40,6 +40,7 @@ impl Default for IgnoreConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct IgnoreEngine {
     config: IgnoreConfig,
     custom_patterns: Vec<glob::Pattern>,

@@ -58,6 +58,11 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             description: "Trigger a full reindex of the project".to_string(),
             input_schema: serde_json::json!({"type":"object","properties":{}}),
         },
+        ToolDefinition {
+            name: "verify".to_string(),
+            description: "Check index integrity: find stale entries and missing files".to_string(),
+            input_schema: serde_json::json!({"type":"object","properties":{}}),
+        },
     ]
 }
 
@@ -248,6 +253,20 @@ impl McpHandler {
                     .map_err(|e| format!("Index error: {}", e))?;
 
                 Ok("Reindex complete".to_string())
+            }
+            "verify" => {
+                let db = Arc::clone(&self.state.db);
+                let ignore = Arc::clone(&self.state.ignore);
+                let root_path = self.state.root_path.clone();
+
+                match crate::indexer::verify_index(&db, &ignore, Path::new(&root_path)) {
+                    Ok((removed, missing, total)) => Ok(format!(
+                        "Index integrity check:\n  Files checked: {}\n  Stale entries removed: {}\n  Files missing from index: {}\n  Status: {}",
+                        total, removed, missing,
+                        if removed == 0 && missing == 0 { "OK" } else { "Issues found" }
+                    )),
+                    Err(e) => Err(format!("Verify failed: {}", e)),
+                }
             }
             _ => Err(format!("Unknown tool: {}", name)),
         }

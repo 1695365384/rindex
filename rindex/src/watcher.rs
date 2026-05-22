@@ -1,5 +1,5 @@
 use crate::db::Database;
-use crate::ignore::IgnoreEngine;
+use crate::ignore::{IgnoreConfig, IgnoreEngine};
 use crate::indexer::walker::FileEntry;
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -66,15 +66,19 @@ impl FileWatcher {
     }
 }
 
-/// Process a batch of changed files: re-index or remove from index
+/// Process a batch of changed files: re-index or remove from index.
+/// Automatically reloads ignore rules when `.gitignore` changes.
+/// Returns true if the ignore rules were reloaded (caller may want to log it).
 pub fn process_changes(
     changes: &[PathBuf],
     db: &Arc<Mutex<Database>>,
-    ignore: &IgnoreEngine,
+    ignore: &mut IgnoreEngine,
     root: &Path,
-) {
+) -> bool {
     // Invalidate search cache on any file change
     crate::search::invalidate_cache();
+
+    let mut ignore_reloaded = false;
 
     for path in changes {
         // Determine relative path
@@ -82,6 +86,14 @@ pub fn process_changes(
             Ok(r) => r.to_string_lossy().replace('\\', "/"),
             Err(_) => continue,
         };
+
+        // Detect .gitignore changes — reload ignore rules and rescan
+        if relative == ".gitignore" || relative.ends_with("/.gitignore") {
+            tracing::info!(".gitignore changed, reloading ignore rules");
+            *ignore = rebuild_ignore_engine(root);
+            ignore_reloaded = true;
+            continue; // reindex loop handles the rescan below
+        }
 
         // Check if file still exists — if deleted, remove from index
         if !path.exists() {
@@ -127,6 +139,46 @@ pub fn process_changes(
             tracing::warn!("Failed to re-index {}: {}", relative, e);
         }
     }
+
+    ignore_reloaded
+}
+
+/// Rebuild the ignore engine from .gitignore files in the project
+fn rebuild_ignore_engine(root: &Path) -> IgnoreEngine {
+    let cfg = IgnoreConfig::default();
+    let mut engine = IgnoreEngine::new(&cfg);
+
+    // Load root .gitignore
+    let root_gi = root.join(".gitignore");
+    if root_gi.exists() {
+        if let Ok(content) = std::fs::read_to_string(&root_gi) {
+            for line in content.lines() {
+                engine.add_gitignore_pattern(line);
+            }
+        }
+    }
+
+    // Load .gitignore in subdirectories (git supports this)
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let sub_gi = path.join(".gitignore");
+                if sub_gi.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&sub_gi) {
+                        let prefix = path.file_name().unwrap().to_string_lossy();
+                        for line in content.lines() {
+                            // Prefix subdirectory gitignore patterns
+                            let prefixed = format!("{}/{}", prefix, line);
+                            engine.add_gitignore_pattern(&prefixed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    engine
 }
 
 fn ext_to_language(ext: &str) -> String {
