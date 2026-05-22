@@ -18,6 +18,56 @@ pub struct SearchResult {
     pub score: f64,
 }
 
+/// Search results grouped by file — more useful for Claude Code consumption
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FileGroupedResult {
+    pub file_path: String,
+    pub matches: Vec<SymbolMatch>,
+    pub total_score: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SymbolMatch {
+    pub symbol_type: String,
+    pub name: Option<String>,
+    pub line: i64,
+    pub snippet: String,
+    pub score: f64,
+}
+
+/// Group a flat list of search results by file path
+pub fn group_by_file(results: Vec<SearchResult>) -> Vec<FileGroupedResult> {
+    use std::collections::HashMap;
+    let mut grouped: HashMap<String, FileGroupedResult> = HashMap::new();
+
+    for r in results {
+        let entry = grouped.entry(r.file_path.clone()).or_insert_with(|| FileGroupedResult {
+            file_path: r.file_path.clone(),
+            matches: Vec::new(),
+            total_score: 0.0,
+        });
+        entry.matches.push(SymbolMatch {
+            symbol_type: r.chunk_type,
+            name: r.name,
+            line: r.start_line,
+            snippet: r.snippet,
+            score: r.score,
+        });
+        entry.total_score += r.score;
+    }
+
+    // Sort by total_score descending
+    let mut result: Vec<FileGroupedResult> = grouped.into_values().collect();
+    result.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Sort matches within each file by line number
+    for file in &mut result {
+        file.matches.sort_by(|a, b| a.line.cmp(&b.line));
+    }
+
+    result
+}
+
 /// LRU cache keyed by normalized query string
 type SearchCache = std::sync::Mutex<LruCache<String, Vec<SearchResult>>>;
 

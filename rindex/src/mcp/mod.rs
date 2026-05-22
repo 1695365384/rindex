@@ -202,7 +202,8 @@ impl McpHandler {
                 let searcher = Searcher::new(&db, embedder_ref);
                 let results = searcher.semantic_search(query, limit)
                     .map_err(|e| format!("Search error: {}", e))?;
-                serde_json::to_string_pretty(&results)
+                let grouped = crate::search::group_by_file(results);
+                serde_json::to_string_pretty(&grouped)
                     .map_err(|e| format!("Serialize error: {}", e))
             }
             "search_symbol" => {
@@ -213,7 +214,8 @@ impl McpHandler {
                 let searcher = Searcher::new(&db, None);
                 let results = searcher.search_symbol(name, chunk_type)
                     .map_err(|e| format!("Search error: {}", e))?;
-                serde_json::to_string_pretty(&results)
+                let grouped = crate::search::group_by_file(results);
+                serde_json::to_string_pretty(&grouped)
                     .map_err(|e| format!("Serialize error: {}", e))
             }
             "project_status" => {
