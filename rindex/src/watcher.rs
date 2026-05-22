@@ -73,6 +73,9 @@ pub fn process_changes(
     ignore: &IgnoreEngine,
     root: &Path,
 ) {
+    // Invalidate search cache on any file change
+    crate::search::invalidate_cache();
+
     for path in changes {
         // Determine relative path
         let relative = match path.strip_prefix(root) {

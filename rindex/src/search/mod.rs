@@ -1,6 +1,11 @@
 use crate::db::Database;
 use crate::embedding::Embedder;
 use anyhow::Result;
+use lru::LruCache;
+use std::num::NonZeroUsize;
+
+/// Default number of search results to cache
+const CACHE_SIZE: usize = 64;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
@@ -13,6 +18,23 @@ pub struct SearchResult {
     pub score: f64,
 }
 
+/// LRU cache keyed by normalized query string
+type SearchCache = std::sync::Mutex<LruCache<String, Vec<SearchResult>>>;
+
+/// Semaphore to avoid redundant embedding computation
+static CACHE: once_cell::sync::Lazy<SearchCache> =
+    once_cell::sync::Lazy::new(|| {
+        std::sync::Mutex::new(LruCache::new(NonZeroUsize::new(CACHE_SIZE).unwrap()))
+    });
+
+/// Invalidate the search cache (called when files change)
+pub fn invalidate_cache() {
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.clear();
+        tracing::debug!("Search cache invalidated");
+    }
+}
+
 pub struct Searcher<'a> {
     db: &'a Database,
     embedder: Option<&'a Embedder>,
@@ -23,8 +45,33 @@ impl<'a> Searcher<'a> {
         Self { db, embedder }
     }
 
-    /// Search by symbol name (LIKE query)
+    /// Search by symbol name with LRU caching
     pub fn search_symbol(&self, name: &str, chunk_type: Option<&str>) -> Result<Vec<SearchResult>> {
+        let cache_key = if let Some(ct) = chunk_type {
+            format!("sym:{}:{}", name, ct)
+        } else {
+            format!("sym:{}", name)
+        };
+
+        // Check cache
+        if let Ok(mut cache) = CACHE.lock() {
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(cached.clone());
+            }
+        }
+
+        let results = self.search_symbol_uncached(name, chunk_type)?;
+
+        // Store in cache
+        if let Ok(mut cache) = CACHE.lock() {
+            cache.put(cache_key, results.clone());
+        }
+
+        Ok(results)
+    }
+
+    /// Search symbol without cache lookup
+    fn search_symbol_uncached(&self, name: &str, chunk_type: Option<&str>) -> Result<Vec<SearchResult>> {
         let conn = self.db.conn()?;
         let pattern = format!("%{}%", name);
 
@@ -73,8 +120,27 @@ impl<'a> Searcher<'a> {
         Ok(rows)
     }
 
-    /// Semantic search using embeddings (brute-force cosine similarity)
+    /// Semantic search with LRU caching
     pub fn semantic_search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let cache_key = format!("sem:{}:{}", query, limit);
+
+        if let Ok(mut cache) = CACHE.lock() {
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(cached.clone());
+            }
+        }
+
+        let results = self.semantic_search_uncached(query, limit)?;
+
+        if let Ok(mut cache) = CACHE.lock() {
+            cache.put(cache_key, results.clone());
+        }
+
+        Ok(results)
+    }
+
+    /// Semantic search without cache lookup (brute-force cosine similarity)
+    fn semantic_search_uncached(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let query_vec = match self.embedder {
             Some(emb) => emb.embed(query)?,
             None => return self.search_symbol(query, None),
