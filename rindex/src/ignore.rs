@@ -1,9 +1,16 @@
-const BUILTIN_PATTERNS: &[&str] = &[
-    ".git/", ".git/**", "node_modules/", "node_modules/**",
-    "target/", "target/**", "dist/", "dist/**", "build/", "build/**",
-    ".next/", ".next/**", ".venv/", ".venv/**", "__pycache__/",
-    "*.pyc", "*.pyo", "*.bin", "*.exe", "*.dll", "*.so", "*.dylib", "*.class",
-    ".DS_Store", "Thumbs.db", "*.log",
+/// Built-in path prefixes that are always ignored (checked via starts_with/contains)
+const BUILTIN_DIRS: &[&str] = &[
+    ".git", "node_modules", "target", "dist", "build", ".next", ".venv", "__pycache__",
+];
+
+/// Built-in file extensions that are always ignored
+const BUILTIN_EXTS: &[&str] = &[
+    "pyc", "pyo", "bin", "exe", "dll", "so", "dylib", "class", "log",
+];
+
+/// Built-in filenames always ignored
+const BUILTIN_FILES: &[&str] = &[
+    ".DS_Store", "Thumbs.db",
 ];
 
 const BINARY_EXTENSIONS: &[&str] = &[
@@ -43,6 +50,7 @@ impl Default for IgnoreConfig {
 #[derive(Clone)]
 pub struct IgnoreEngine {
     config: IgnoreConfig,
+    /// Custom glob patterns from .gitignore (pre-compiled)
     custom_patterns: Vec<glob::Pattern>,
 }
 
@@ -61,35 +69,69 @@ impl IgnoreEngine {
         }
     }
 
+    /// Fast path: check if a relative path should be ignored
+    /// Uses prefix/suffix matching instead of glob where possible
+    #[inline]
     pub fn should_ignore(&self, relative_path: &str) -> bool {
-        let normalized = relative_path.replace('\\', "/");
-        for pattern_str in BUILTIN_PATTERNS {
-            if let Ok(p) = glob::Pattern::new(pattern_str) {
-                if p.matches(&normalized) || p.matches(&format!("**/{}", normalized)) {
-                    return true;
-                }
+        let norm = relative_path.replace('\\', "/");
+
+        // Check built-in directory prefixes: "dir/" or "dir/anything"
+        for dir in BUILTIN_DIRS {
+            if norm.starts_with(dir) && (norm.len() == dir.len() || norm.as_bytes().get(dir.len()) == Some(&b'/')) {
+                return true;
             }
-        }
-        for pattern in &self.custom_patterns {
-            if pattern.matches(&normalized) {
+            // Also check "/dir/" for nested paths
+            let search = format!("/{}/", dir);
+            if norm.contains(&search) {
                 return true;
             }
         }
+
+        // Check built-in file extensions: "*.ext"
+        if let Some(dot) = norm.rfind('.') {
+            let ext = &norm[dot + 1..];
+            if BUILTIN_EXTS.contains(&ext) {
+                return true;
+            }
+        }
+
+        // Check built-in filenames
+        if let Some(last_slash) = norm.rfind('/') {
+            let fname = &norm[last_slash + 1..];
+            if BUILTIN_FILES.contains(&fname) {
+                return true;
+            }
+        } else if BUILTIN_FILES.contains(&norm.as_str()) {
+            return true;
+        }
+
+        // Check custom gitignore patterns (pre-compiled)
+        for pattern in &self.custom_patterns {
+            if pattern.matches(&norm) {
+                return true;
+            }
+        }
+
         false
     }
 
+    #[inline]
     pub fn is_binary_extension(ext: &str) -> bool {
-        BINARY_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+        BINARY_EXTENSIONS.contains(&ext)
     }
 
+    #[inline]
     pub fn is_text_extension(ext: &str) -> bool {
-        TEXT_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+        TEXT_EXTENSIONS.contains(&ext)
     }
 
+    #[inline]
     pub fn is_too_large(&self, size: u64) -> bool {
         size > self.config.max_file_size
     }
 
+    /// Combined check: should this file be included in the index?
+    #[inline]
     pub fn should_index(&self, relative_path: &str, size: u64, ext: &str) -> bool {
         if self.should_ignore(relative_path) { return false; }
         if Self::is_binary_extension(ext) { return false; }
