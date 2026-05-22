@@ -58,6 +58,7 @@ fn main() -> Result<()> {
                 None, // No embedder at startup — loaded lazily
                 Arc::clone(&ignore_arc),
                 &root_path,
+                None, // IndexState managed internally
             );
 
             std::thread::spawn(move || {

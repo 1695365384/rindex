@@ -217,7 +217,7 @@ impl McpHandler {
                 let root_path = self.state.root_path.clone();
 
                 // Index without embeddings (they generate lazily on search)
-                let (handle, rx) = crate::indexer::index_project(db, None, ignore, Path::new(&root_path));
+                let (handle, rx) = crate::indexer::index_project(db, None, ignore, Path::new(&root_path), None);
 
                 // Wait for completion
                 while let Ok(progress) = rx.recv() {
