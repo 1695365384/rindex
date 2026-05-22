@@ -10,21 +10,13 @@ pub struct Symbol {
     pub content: String,
 }
 
-extern "C" {
-    fn tree_sitter_rust() -> Language;
-    fn tree_sitter_python() -> Language;
-    fn tree_sitter_javascript() -> Language;
-    fn tree_sitter_typescript() -> Language;
-    fn tree_sitter_go() -> Language;
-}
-
 pub fn get_language(name: &str) -> Option<Language> {
     match name {
-        "rust" => Some(unsafe { tree_sitter_rust() }),
-        "python" => Some(unsafe { tree_sitter_python() }),
-        "javascript" | "js" | "jsx" => Some(unsafe { tree_sitter_javascript() }),
-        "typescript" | "ts" | "tsx" => Some(unsafe { tree_sitter_typescript() }),
-        "go" => Some(unsafe { tree_sitter_go() }),
+        "rust" => Some(tree_sitter_rust::language()),
+        "python" => Some(tree_sitter_python::language()),
+        "javascript" | "js" | "jsx" => Some(tree_sitter_javascript::language()),
+        "typescript" | "ts" | "tsx" => Some(tree_sitter_typescript::language()),
+        "go" => Some(tree_sitter_go::language()),
         _ => None,
     }
 }
@@ -93,7 +85,7 @@ fn extract_symbols(node: tree_sitter::Node, source: &str, symbols: &mut Vec<Symb
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             extract_symbols(child, source, symbols, lang);
         }
     }
@@ -116,7 +108,7 @@ fn kind_to_type(kind: &str) -> String {
 
 fn find_name_node(node: tree_sitter::Node, source: &str) -> Option<String> {
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             if matches!(child.kind(), "name" | "identifier" | "type_identifier") {
                 return child
                     .utf8_text(source.as_bytes())

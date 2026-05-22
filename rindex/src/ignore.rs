@@ -41,12 +41,13 @@ impl Default for IgnoreConfig {
 }
 
 pub struct IgnoreEngine {
+    config: IgnoreConfig,
     custom_patterns: Vec<glob::Pattern>,
 }
 
 impl IgnoreEngine {
-    pub fn new(_config: &IgnoreConfig) -> Self {
-        Self { custom_patterns: Vec::new() }
+    pub fn new(config: &IgnoreConfig) -> Self {
+        Self { config: config.clone(), custom_patterns: Vec::new() }
     }
 
     pub fn add_gitignore_pattern(&mut self, line: &str) {
@@ -85,7 +86,7 @@ impl IgnoreEngine {
     }
 
     pub fn is_too_large(&self, size: u64) -> bool {
-        size > self.max_file_size
+        size > self.config.max_file_size
     }
 
     pub fn should_index(&self, relative_path: &str, size: u64, ext: &str) -> bool {

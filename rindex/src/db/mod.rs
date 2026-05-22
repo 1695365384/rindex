@@ -25,7 +25,6 @@ impl Database {
         Ok(())
     }
 
-    #[cfg(test)]
     pub fn open_temp() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
