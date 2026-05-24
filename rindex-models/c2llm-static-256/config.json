@@ -1,0 +1,6 @@
+{
+  "vocab_size": 151643,
+  "dim": 256,
+  "model_type": "static",
+  "teacher": "codefuse-ai/C2LLM-0.5B"
+}

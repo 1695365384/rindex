@@ -2,9 +2,13 @@
 **/target/
 **/tmp_test/
 
-# ── Model files (generated, too large for git) ──
+# ── Model cache (downloaded, not tracked) ──
 **/models/
-rindex-models/
+
+# ── Distilled model (tracked via LFS, used by installers) ──
+!rindex-models/
+
+# ── Old BERT model dir ──
 model/
 
 # ── Release packages ──
