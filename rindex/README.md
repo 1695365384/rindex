@@ -56,8 +56,8 @@ Download the release package, extract, double-click the install script:
 
 | Platform | Package | Installer |
 |---|---|---|
-| **Windows 11** | `rindex-v0.2.0-windows-x64.zip` | Double-click `install.bat` |
-| **macOS** | `rindex-v0.2.0-macos-arm64.tar.gz` | Double-click `install.command` |
+| **Windows 11** | `rindex-v1.0.0-windows-x64.zip` | Double-click `install.bat` |
+| **macOS** | `rindex-v1.0.0-macos-arm64.tar.gz` | Double-click `install.command` |
 
 Binary, embedding model, PATH — everything installed in one click. After that, open your coding agent in any project. rindex auto-detects your client and configures everything on first start. Zero manual steps.
 
