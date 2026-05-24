@@ -1,0 +1,25 @@
+# ── Rust build ──
+**/target/
+**/tmp_test/
+
+# ── Model files (generated, too large for git) ──
+**/models/
+rindex-models/
+model/
+
+# ── Release packages ──
+rindex-v*/
+*.zip
+*.tar.gz
+
+# ── Python ──
+__pycache__/
+*.pyc
+
+# ── IDE / OS ──
+.vscode/
+.DS_Store
+*.log
+
+# ── Test artifacts ──
+test_*.json

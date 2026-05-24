@@ -1,81 +1,152 @@
 use anyhow::{Context, Result};
-use candle_core::{Device, Tensor};
-use candle_transformers::models::bert::{BertModel, Config, DTYPE};
-use hf_hub::api::sync::Api;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
 pub struct Embedder {
-    model: BertModel,
+    /// token_id -> embedding_vec, shape [vocab_size, dim]
+    embeddings: Vec<Vec<f32>>,
     tokenizer: Tokenizer,
-    device: Device,
+    dim: usize,
 }
 
 impl Embedder {
-    #[allow(unused_variables)]
-    pub fn load(cache_dir: &Path, model_id: &str) -> Result<Self> {
-        let device = Device::Cpu;
+    /// Load a static token embedding model from a directory.
+    ///
+    /// Expected files in `model_dir`:
+    ///   - `token_embeddings.safetensors`  — [vocab_size, dim] f32 matrix
+    ///   - `tokenizer.json`                — HuggingFace tokenizer
+    ///   - `config.json`                   — {"vocab_size", "dim", "model_type"}
+    ///
+    /// The `model_id` parameter is used as a subdirectory name under `cache_dir`.
+    /// The `_hf_endpoint` parameter is kept for API compatibility but unused
+    /// (distilled models are local files, not downloaded from HuggingFace).
+    pub fn load(cache_dir: &Path, model_id: &str, _hf_endpoint: Option<&str>) -> Result<Self> {
+        let model_dir = cache_dir.join(model_id);
 
-        let api = Api::new()?.repo(hf_hub::Repo::with_revision(
-            model_id.to_string(),
-            hf_hub::RepoType::Model,
-            "main".to_string(),
-        ));
+        if !model_dir.exists() {
+            anyhow::bail!(
+                "Static embedding model not found at: {}\n\
+                 Run 'python scripts/distill.py --output {}' first, then copy the output there.",
+                model_dir.display(),
+                model_dir.display(),
+            );
+        }
 
-        let model_path = api.get("model.safetensors")?;
-        let config_path = api.get("config.json")?;
-        let tokenizer_path = api.get("tokenizer.json")?;
-
-        let config = std::fs::read_to_string(&config_path)
-            .context("Failed to read config.json")?;
-        let config: Config = serde_json::from_str(&config)
-            .context("Failed to parse BERT config")?;
-
+        // 1. Load tokenizer
+        let tokenizer_path = model_dir.join("tokenizer.json");
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        let vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(
-                &[model_path],
-                DTYPE,
-                &device,
-            )?
-        };
+        // 2. Load config
+        let config_path = model_dir.join("config.json");
+        let config_raw = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        let config: serde_json::Value = serde_json::from_str(&config_raw)
+            .context("Failed to parse config.json")?;
 
-        let model = BertModel::load(vb, &config)?;
+        let vocab_size = config["vocab_size"].as_u64()
+            .context("config.json missing vocab_size")? as usize;
+        let dim = config["dim"].as_u64()
+            .context("config.json missing dim")? as usize;
 
-        Ok(Self { model, tokenizer, device })
+        // 3. Load token embeddings (safetensors)
+        let emb_path = model_dir.join("token_embeddings.safetensors");
+        let data = std::fs::read(&emb_path)
+            .with_context(|| format!("Failed to read {}", emb_path.display()))?;
+
+        let safetensors = safetensors::SafeTensors::deserialize(&data)
+            .context("Failed to parse safetensors file")?;
+
+        let view = safetensors.tensor("token_embeddings")
+            .context("safetensors missing 'token_embeddings' tensor")?;
+
+        let shape = view.shape();
+        if shape.len() != 2 || shape[0] != vocab_size || shape[1] != dim {
+            anyhow::bail!(
+                "Expected tensor shape [{}, {}], got {:?}",
+                vocab_size, dim, shape
+            );
+        }
+
+        // safetensors stores raw bytes; interpret as f32 little-endian
+        let raw: &[u8] = view.data();
+        let floats: Vec<f32> = raw
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        if floats.len() != vocab_size * dim {
+            anyhow::bail!(
+                "Data size mismatch: expected {} floats ({}×{}), got {}",
+                vocab_size * dim, vocab_size, dim, floats.len()
+            );
+        }
+
+        let embeddings: Vec<Vec<f32>> = floats.chunks_exact(dim).map(|c| c.to_vec()).collect();
+
+        tracing::info!(
+            "Loaded static embedding model: {} tokens × {} dim ({:.0} MB)",
+            vocab_size,
+            dim,
+            data.len() as f64 / (1024.0 * 1024.0),
+        );
+
+        Ok(Self { embeddings, tokenizer, dim })
     }
 
+    /// Embed a single text into a fixed-dimensional vector.
+    ///
+    /// Algorithm:
+    ///   1. Tokenize the text
+    ///   2. Look up each token's static embedding from the table
+    ///   3. Mean pool (average all token vectors)
+    ///   4. L2 normalize
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let tokens = self.tokenizer
-            .encode(text, true)
-            .map_err(|e| anyhow::anyhow!("Failed to tokenize text: {}", e))?;
+        let encoding = self.tokenizer
+            .encode(text, true) // add_special_tokens = true
+            .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
-        let token_ids = tokens.get_ids();
-        let token_type_ids = vec![0u32; token_ids.len()];
-        let attention_mask = vec![1u32; token_ids.len()];
+        let ids = encoding.get_ids();
 
-        let token_ids = Tensor::new(token_ids, &self.device)?.unsqueeze(0)?;
-        let token_type_ids = Tensor::new(&token_type_ids[..], &self.device)?.unsqueeze(0)?;
-        let attention_mask = Tensor::new(&attention_mask[..], &self.device)?.unsqueeze(0)?;
+        if ids.is_empty() {
+            return Ok(vec![0.0_f32; self.dim]);
+        }
 
-        let output = self.model.forward(&token_ids, &token_type_ids, Some(&attention_mask))?;
+        // Mean pool
+        let mut pooled = vec![0.0_f32; self.dim];
+        let mut count: usize = 0;
 
-        // Use mean pooling
-        let (_n, _seq_len, _hidden) = output.dims3()?;
-        let embedding = output
-            .mean(1)?
-            .squeeze(0)?
-            .to_vec1::<f32>()?;
+        for &tok_id in ids {
+            let idx = tok_id as usize;
+            if idx < self.embeddings.len() {
+                let emb = &self.embeddings[idx];
+                for i in 0..self.dim {
+                    pooled[i] += emb[i];
+                }
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            return Ok(vec![0.0_f32; self.dim]);
+        }
+
+        for v in &mut pooled {
+            *v /= count as f32;
+        }
 
         // L2 normalize
-        let norm = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let normalized: Vec<f32> = embedding.into_iter().map(|x| x / norm).collect();
+        let norm: f32 = pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for v in &mut pooled {
+                *v /= norm;
+            }
+        }
 
-        Ok(normalized)
+        Ok(pooled)
     }
 
+    /// Embed multiple texts. Each text is processed independently.
     pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         texts.iter().map(|t| self.embed(t)).collect()
     }

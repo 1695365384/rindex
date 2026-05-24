@@ -188,6 +188,12 @@ fn index_single_file(db: &Arc<Mutex<Database>>, embedder: Option<&Embedder>, ent
             chunk.start_line as i64, chunk.end_line as i64, &chunk.content,
         )?;
 
+        // Sync to FTS5 index
+        queries::insert_chunk_fts(
+            &db_guard, chunk_id, &chunk.content,
+            chunk.name.as_deref(), &entry.relative_path,
+        )?;
+
         if let Some(emb) = embedder {
             let content_for_embed = chunk.name.as_deref()
                 .map(|n| format!("{}: {}", n, chunk.content))
@@ -209,11 +215,17 @@ fn store_embedding(db: &Database, chunk_id: i64, vec: &[f32]) -> Result<()> {
     Ok(())
 }
 
-/// Backfill embeddings for all chunks that don't have them yet.
+/// Backfill embeddings for all chunks.
+/// If `force` is true, clears existing embeddings first (e.g. after model upgrade).
 /// Called after the model loads lazily to fill in gaps from the initial text-only index.
-pub fn backfill_embeddings(db: &Arc<Mutex<Database>>, embedder: &Embedder) -> Result<()> {
+pub fn backfill_embeddings(db: &Arc<Mutex<Database>>, embedder: &Embedder, force: bool) -> Result<()> {
     let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
     let conn = db_guard.conn()?;
+
+    if force {
+        conn.execute("UPDATE chunks SET embedding = NULL", [])?;
+        tracing::info!("Cleared existing embeddings for full re-backfill");
+    }
 
     // Find all chunks without embeddings
     let mut stmt = conn.prepare(
@@ -293,4 +305,77 @@ pub fn index_single_file_public(
     entry: &crate::indexer::walker::FileEntry,
 ) -> Result<()> {
     index_single_file(db, embedder, entry)
+}
+
+/// Sync the index with the current state of the filesystem.
+/// Only re-indexes changed/new files; removes stale entries.
+/// This ensures project memory stays accurate across sessions,
+/// even when files changed while rindex was not running.
+///
+/// Uses mtime+size pre-check to skip unchanged files without reading them.
+pub fn sync_project_index(
+    db: &Arc<Mutex<Database>>,
+    embedder: Option<&Embedder>,
+    ignore: &IgnoreEngine,
+    root: &Path,
+) -> Result<(usize, usize, usize)> {
+    let root_path = root.to_path_buf();
+    let walker = FileWalker::new(ignore);
+    let files = walker.walk(&root_path)?;
+
+    let disk_paths: std::collections::HashSet<String> =
+        files.iter().map(|f| f.relative_path.clone()).collect();
+
+    // Build lookup of (mtime, size) from DB for quick pre-check
+    let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+    let indexed = queries::get_all_files(&db_guard)?;
+    let db_meta: std::collections::HashMap<&str, (i64, i64)> = indexed
+        .iter()
+        .map(|f| (f.path.as_str(), (f.mtime, f.size)))
+        .collect();
+    let indexed_paths: std::collections::HashSet<&str> =
+        indexed.iter().map(|f| f.path.as_str()).collect();
+    drop(db_guard);
+
+    // Phase 1: Re-index new/changed files (quick mtime/size pre-check avoids file read + hash)
+    let mut indexed_count = 0;
+    for entry in &files {
+        // Skip if mtime and size match exactly — file hasn't changed
+        if let Some(&(db_mtime, db_size)) = db_meta.get(entry.relative_path.as_str()) {
+            if db_mtime == entry.mtime as i64 && db_size == entry.size as i64 {
+                continue;
+            }
+        }
+        if let Err(e) = index_single_file(db, embedder, entry) {
+            tracing::warn!("Failed to sync {}: {}", entry.relative_path, e);
+        }
+        indexed_count += 1;
+    }
+
+    // Phase 2: Remove stale entries (indexed but no longer on disk)
+    let mut removed = 0;
+    for path in indexed_paths {
+        if !disk_paths.contains(path) {
+            let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+            if queries::delete_file(&db_guard, path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+
+    // Phase 3: Update project stats
+    let chunk_count = count_chunks(db);
+    let root_str = root_path.to_string_lossy().to_string();
+    let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+    queries::update_project_stats(&db_guard, &root_str, files.len() as i64, chunk_count as i64)?;
+
+    if indexed_count > 0 || removed > 0 {
+        crate::search::invalidate_cache();
+        tracing::info!("Index sync: {} re-indexed, {} stale removed (total {} files)",
+            indexed_count, removed, files.len());
+    } else {
+        tracing::info!("Index is current ({} files, no changes detected)", files.len());
+    }
+
+    Ok((indexed_count, removed, files.len()))
 }

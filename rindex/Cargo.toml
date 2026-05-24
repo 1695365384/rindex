@@ -7,15 +7,15 @@ description = "Local file index MCP server with semantic search for Claude Code"
 
 [dependencies]
 # MCP protocol
+rmcp = { version = "1.5", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# ML (candle)
-candle-core = "0.8"
-candle-nn = "0.8"
-candle-transformers = "0.8"
-hf-hub = "0.4"
-tokenizers = "0.21"
+# Static embeddings (no ML framework, just tokenizer + embedding table)
+safetensors = "0.4"
+tokenizers = "0.23"
 
 # Tree-sitter AST parsing
 tree-sitter = ">=0.24, <1"

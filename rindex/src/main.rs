@@ -1,21 +1,125 @@
 use rindex::config::Config;
 use rindex::db::Database;
 use rindex::ignore::{IgnoreConfig, IgnoreEngine};
-use rindex::mcp::{AppState, McpHandler, format_response, parse_request};
+use rindex::mcp::{AppState, McpServerHandler};
 use rindex::watcher;
 use anyhow::{Context, Result};
-use std::io::{BufRead, BufReader, Write};
+use clap::{Parser, Subcommand};
+use rmcp::service::ServiceExt;
+use std::path::PathBuf;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
-fn main() -> Result<()> {
+#[derive(Debug, Parser)]
+#[command(name = "rindex", version, about = "Local file index MCP server and CLI")]
+struct Cli {
+    /// Project root path (defaults to current directory)
+    #[arg(short = 'p', long = "path")]
+    path: Option<PathBuf>,
+
+    /// Output JSON for CLI subcommands where applicable
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Show project indexing status
+    Status,
+    /// Semantic or keyword-oriented search
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        #[arg(long = "type")]
+        file_type: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Search symbol by name
+    Symbol {
+        name: String,
+        #[arg(long)]
+        chunk_type: Option<String>,
+        #[arg(long = "type")]
+        file_type: Option<String>,
+    },
+    /// Find semantically related code
+    Related {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        file_path: Option<String>,
+        #[arg(long)]
+        line: Option<i64>,
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+    },
+    /// Save project memory note
+    Note {
+        content: String,
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Show recent project memory notes
+    Context {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Verify index integrity
+    Verify,
+    /// Rebuild index synchronously
+    Reindex,
+    /// Backfill embeddings for chunks missing them
+    Backfill,
+    /// One-click setup: configures .mcp.json + copies skill file for Claude Code
+    Setup,
+}
+
+/// Load the embedding model for CLI commands (search, related, etc.).
+/// Returns None if the model isn't available (text-only fallback).
+fn load_embedder_for_cli(config: &Config) -> Option<rindex::embedding::Embedder> {
+    match rindex::embedding::Embedder::load(
+        &config.model_cache_dir,
+        &config.model_id,
+        Some("https://hf-mirror.com"),
+    ) {
+        Ok(e) => {
+            eprintln!("Embedding model loaded");
+            Some(e)
+        }
+        Err(e) => {
+            eprintln!("Note: embedding model not loaded ({}) — text-only search", e);
+            None
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     // Parse CLI before initializing tracing (so --help and --version don't log)
+    let cli = Cli::parse();
+    if let Some(path) = &cli.path {
+        std::env::set_current_dir(path)
+            .with_context(|| format!("Failed to switch to project path: {:?}", path))?;
+    }
+
     let config = Config::load()
         .context("Failed to load configuration")?;
+
+    if let Some(cmd) = cli.command {
+        return run_cli(config, cmd, cli.json);
+    }
 
     // Configure logging: JSON format for production, human-readable for dev
     let log_format = std::env::var("RINDEX_LOG_FORMAT").unwrap_or_default();
     let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("rindex=info".parse()
@@ -67,24 +171,103 @@ fn main() -> Result<()> {
 
     let config_arc = Arc::new(config);
 
-    // Auto-index in background (embeddings added lazily on first search)
+    // ── Auto-setup: detect coding agent & configure ──
+    {
+        use std::io::Write;
+        let bin = std::env::current_exe().ok();
+        let bin_str = bin.as_ref().map(|b| b.to_string_lossy().to_string()).unwrap_or_else(|| "rindex".into());
+
+        // Claude Code skill (always install, clients ignore unused files)
+        let skill_dir = root_path.join(".claude").join("skills").join("rindex");
+        let skill_path = skill_dir.join("SKILL.md");
+        if !skill_path.exists() {
+            std::fs::create_dir_all(&skill_dir).ok();
+            std::fs::write(&skill_path, include_str!("../../plugin/skills/rindex/SKILL.md")).ok();
+            tracing::info!("skill → .claude/skills/rindex/");
+        }
+
+        // MCP config for each known client
+        let clients: &[(&str, &str)] = &[
+            (".mcp.json",              ""),
+            (".cursor/mcp.json",       ".cursor/"),
+            (".windsurf/mcp.json",     ".windsurf/"),
+        ];
+
+        let mcp_config = serde_json::json!({
+            "mcpServers": {
+                "rindex": {
+                    "command": &bin_str,
+                    "args": ["--path", &root_str]
+                }
+            }
+        });
+        let config_json = serde_json::to_string_pretty(&mcp_config).unwrap();
+
+        for (path, parent) in clients {
+            let config_path = root_path.join(path);
+            if !config_path.exists() {
+                std::fs::create_dir_all(root_path.join(parent)).ok();
+                if let Ok(mut f) = std::fs::File::create(&config_path) {
+                    f.write_all(config_json.as_bytes()).ok();
+                    tracing::info!("mcp config → {}", path);
+                }
+            }
+        }
+
+        // .llm-index-ignore
+        let ignore_path = root_path.join(".llm-index-ignore");
+        if !ignore_path.exists() {
+            std::fs::write(&ignore_path, "# rindex exclude patterns (like .gitignore)\n").ok();
+        }
+    }
+
     let db_arc = Arc::new(Mutex::new(db));
     let ignore_arc = Arc::new(ignore);
 
-    {
-        let db = db_arc.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
-        let proj = rindex::db::queries::get_or_create_project(&db, &root_str)?;
-        if proj.file_count == 0 {
-            tracing::info!("First time indexing project (text-only, embeddings on demand)...");
-            let (_handle, rx) = rindex::indexer::index_project(
-                Arc::clone(&db_arc),
-                None, // No embedder at startup — loaded lazily
-                Arc::clone(&ignore_arc),
-                &root_path,
-                None, // IndexState managed internally
-            );
+    // Create AppState early so MCP event loop can start immediately.
+    // Embedder starts empty, index runs in background — search/project_status
+    // work even while indexing is in progress.
+    let state = AppState {
+        root_path: root_str.clone(),
+        db: db_arc.clone(),
+        config: config_arc.clone(),
+        embedder: Arc::new(Mutex::new(None)),
+        model_state: Arc::new(Mutex::new(rindex::mcp::ModelLoadState::Pending)),
+        ignore: ignore_arc.clone(),
+    };
 
-            std::thread::spawn(move || {
+    // Spawn background indexing so MCP event loop is not blocked.
+    // First run: full index_project. Subsequent runs: incremental sync + FTS rebuild.
+    {
+        let db = Arc::clone(&db_arc);
+        let ignore = Arc::clone(&ignore_arc);
+        let root = root_path.clone();
+        let root_s = root_str.clone();
+        std::thread::spawn(move || {
+            let proj = match db.lock() {
+                Ok(d) => match rindex::db::queries::get_or_create_project(&d, &root_s) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!("Background index: get_or_create_project failed: {}", e);
+                        return;
+                    }
+                },
+                Err(e) => {
+                    tracing::error!("Background index: DB lock poisoned: {}", e);
+                    return;
+                }
+            };
+
+            if proj.file_count == 0 {
+                tracing::info!("First time indexing project (text-only, embeddings on demand)...");
+                let (_handle, rx) = rindex::indexer::index_project(
+                    Arc::clone(&db),
+                    None,
+                    Arc::clone(&ignore),
+                    &root,
+                    None,
+                );
+
                 while let Ok(progress) = rx.recv() {
                     match progress.phase.as_str() {
                         "scanning" => tracing::info!("Scanning project files..."),
@@ -95,20 +278,42 @@ fn main() -> Result<()> {
                         _ => {}
                     }
                 }
-            });
-        } else {
-            tracing::info!("Project already indexed ({} files, {} chunks)", proj.file_count, proj.chunk_count);
-        }
+            } else {
+                tracing::info!("Project already indexed ({} files, {} chunks). Verifying...",
+                    proj.file_count, proj.chunk_count);
+                match rindex::indexer::sync_project_index(&db, None, &ignore, &root) {
+                    Ok((synced, removed, total)) => {
+                        tracing::info!(
+                            "Sync complete: {} synced, {} removed, {} total",
+                            synced, removed, total
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Background sync failed: {}", e);
+                        return;
+                    }
+                }
+
+                match db.lock() {
+                    Ok(d) => {
+                        match rindex::db::queries::rebuild_fts_index(&d) {
+                            Ok(count) if count > 0 => {
+                                tracing::info!("FTS5 index rebuilt: {} chunks indexed", count);
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::error!("FTS rebuild failed: {}", e),
+                        }
+                    }
+                    Err(e) => tracing::error!("FTS rebuild: DB lock poisoned: {}", e),
+                }
+            }
+
+            tracing::info!("Background indexing complete");
+        });
     }
 
-    // Create MCP handler (embedder loads lazily on first search)
-    let state = AppState {
-        root_path: root_str,
-        db: db_arc,
-        config: config_arc,
-        embedder: Mutex::new(None),
-        ignore: ignore_arc,
-    };
+    // Start background model loading (does not block startup)
+    state.start_model_loading();
 
     // Start file watcher for incremental re-indexing
     let change_rx = watcher::FileWatcher::start(&root_path)
@@ -118,60 +323,253 @@ fn main() -> Result<()> {
         tracing::info!("File watcher active, incremental re-indexing enabled");
     }
 
-    // Create copies for watcher before moving state into handler
-    let watch_db = state.db.clone();
-    let watch_ignore = Arc::new(Mutex::new((*state.ignore).clone()));
-    let handler = McpHandler::new(state);
+    let handler = McpServerHandler { state };
 
-    // MCP event loop
-    tracing::info!("rindex ready, entering MCP event loop");
-    let stdin = std::io::stdin();
-    let reader = BufReader::new(stdin.lock());
-    let mut stdout = std::io::stdout().lock();
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        // Drain any file changes before processing the request
-        if let Some(ref rx) = change_rx {
+    // Spawn file watcher in a tokio task (replaces old stdin loop polling)
+    if let Some(rx) = change_rx {
+        let watch_db = handler.state.db.clone();
+        let watch_ignore = Arc::new(Mutex::new((*handler.state.ignore).clone()));
+        let root = root_path.clone();
+        tokio::spawn(async move {
             loop {
                 match rx.try_recv() {
                     Ok(changes) => {
-                        if watcher::process_changes(&changes, &watch_db, &mut *watch_ignore.lock().unwrap(), &root_path) {
+                        if watcher::process_changes(&changes, &watch_db, &mut *watch_ignore.lock().unwrap(), &root) {
                             tracing::info!("Ignore rules reloaded from .gitignore change");
                         }
                     }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Empty) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        tracing::info!("File watcher disconnected");
+                        break;
+                    }
                 }
             }
-        }
+        });
+    }
 
-        match parse_request(&line) {
-            Ok(req) => {
-                let resp = handler.handle_request(req);
-                let output = format_response(&resp);
-                stdout.write_all(output.as_bytes())?;
-                stdout.flush()?;
+    // Start MCP server via rmcp — handles initialize, tools/list, and tools/call automatically
+    tracing::info!("rindex ready, starting MCP server via rmcp");
+    let running = handler.serve(rmcp::transport::io::stdio()).await?;
+    running.waiting().await?;
+
+    Ok(())
+}
+
+fn build_ignore_engine(root_path: &std::path::Path, max_file_size: u64) -> Result<IgnoreEngine> {
+    let ignore_cfg = IgnoreConfig { max_file_size };
+    let mut ignore = IgnoreEngine::new(&ignore_cfg);
+
+    let gitignore_path = root_path.join(".gitignore");
+    if gitignore_path.exists() {
+        let content = std::fs::read_to_string(&gitignore_path)
+            .with_context(|| format!("Failed to read {:?}", gitignore_path))?;
+        for line in content.lines() {
+            ignore.add_gitignore_pattern(line);
+        }
+    }
+
+    let llm_ignore_path = root_path.join(".llm-index-ignore");
+    if llm_ignore_path.exists() {
+        let content = std::fs::read_to_string(&llm_ignore_path)
+            .with_context(|| format!("Failed to read {:?}", llm_ignore_path))?;
+        for line in content.lines() {
+            ignore.add_gitignore_pattern(line);
+        }
+    }
+
+    Ok(ignore)
+}
+
+fn print_output<T: serde::Serialize>(value: &T, as_json: bool) -> Result<()> {
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    }
+    Ok(())
+}
+
+fn run_cli(config: Config, cmd: Commands, as_json: bool) -> Result<()> {
+    let root_str = config.project_root.to_string_lossy().to_string();
+
+    match cmd {
+        Commands::Status => {
+            let db = Database::open(&config.db_path)?;
+            let proj = rindex::db::queries::get_or_create_project(&db, &root_str)
+                .unwrap_or_default();
+            let indexed_at = proj.indexed_at
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "never".to_string());
+            let status = serde_json::json!({
+                "project": root_str,
+                "last_indexed": indexed_at,
+                "files": proj.file_count,
+                "chunks": proj.chunk_count,
+                "model": "cli mode (loaded on MCP startup)",
+            });
+            print_output(&status, as_json)?;
+        }
+        Commands::Search { query, limit, file_type, path } => {
+            let db = Database::open(&config.db_path)?;
+            let embedder = load_embedder_for_cli(&config);
+            let searcher = rindex::search::Searcher::new(&db, embedder.as_ref());
+            let mut results = searcher.semantic_search(&query, limit.min(50))?;
+            if let Some(ft) = file_type {
+                results.retain(|r| r.file_path.ends_with(&format!(".{}", ft)));
             }
-            Err(e) => {
-                tracing::error!("Failed to parse request: {}", e);
-                let error_resp = rindex::mcp::McpResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: serde_json::Value::Null,
-                    result: None,
-                    error: Some(rindex::mcp::McpError {
-                        code: -32700,
-                        message: format!("Parse error: {}", e),
-                        data: None,
-                    }),
-                };
-                stdout.write_all(format_response(&error_resp).as_bytes())?;
-                stdout.flush()?;
+            if let Some(fp) = path {
+                results.retain(|r| r.file_path.contains(fp.as_str()));
             }
+            let grouped = rindex::search::group_by_file(results);
+            print_output(&grouped, as_json)?;
+        }
+        Commands::Symbol { name, chunk_type, file_type } => {
+            let db = Database::open(&config.db_path)?;
+            let searcher = rindex::search::Searcher::new(&db, None);
+            let mut results = searcher.search_symbol(&name, chunk_type.as_deref())?;
+            if let Some(ft) = file_type {
+                results.retain(|r| r.file_path.ends_with(&format!(".{}", ft)));
+            }
+            let grouped = rindex::search::group_by_file(results);
+            print_output(&grouped, as_json)?;
+        }
+        Commands::Related { name, file_path, line, limit } => {
+            if name.is_none() && (file_path.is_none() || line.is_none()) {
+                anyhow::bail!("Provide --name or both --file-path and --line");
+            }
+            let db = Database::open(&config.db_path)?;
+            let embedder = load_embedder_for_cli(&config);
+            let searcher = rindex::search::Searcher::new(&db, embedder.as_ref());
+            let results = searcher.find_related(
+                name.as_deref(),
+                file_path.as_deref(),
+                line,
+                limit.min(20),
+            )?;
+            let grouped = rindex::search::group_by_file(results);
+            print_output(&grouped, as_json)?;
+        }
+        Commands::Note { content, kind } => {
+            let db = Database::open(&config.db_path)?;
+            let kind = kind.unwrap_or_else(|| "note".to_string());
+            let id = rindex::db::queries::insert_observation(&db, &root_str, &kind, &content)?;
+            let out = serde_json::json!({"id": id, "kind": kind, "saved": true});
+            print_output(&out, as_json)?;
+        }
+        Commands::Context { limit, kind } => {
+            let db = Database::open(&config.db_path)?;
+            let observations = rindex::db::queries::get_recent_observations(
+                &db,
+                &root_str,
+                limit.min(50),
+                kind.as_deref(),
+            )?;
+            print_output(&observations, as_json)?;
+        }
+        Commands::Verify => {
+            let ignore = build_ignore_engine(&config.project_root, config.max_file_size)?;
+            let db = Arc::new(Mutex::new(Database::open(&config.db_path)?));
+            let (removed, missing, total) = rindex::indexer::verify_index(
+                &db,
+                &ignore,
+                &config.project_root,
+            )?;
+            let out = serde_json::json!({
+                "checked": total,
+                "stale_removed": removed,
+                "missing": missing,
+                "ok": removed == 0 && missing == 0,
+            });
+            print_output(&out, as_json)?;
+        }
+        Commands::Reindex => {
+            let ignore = Arc::new(build_ignore_engine(&config.project_root, config.max_file_size)?);
+            let db = Arc::new(Mutex::new(Database::open(&config.db_path)?));
+            let (handle, rx) = rindex::indexer::index_project(
+                Arc::clone(&db),
+                None,
+                Arc::clone(&ignore),
+                &config.project_root,
+                None,
+            );
+            let mut last = serde_json::json!({"phase": "starting"});
+            while let Ok(progress) = rx.recv() {
+                last = serde_json::json!({
+                    "phase": progress.phase,
+                    "indexed": progress.indexed_files,
+                    "total": progress.total_files,
+                    "chunks": progress.total_chunks,
+                });
+                if !as_json {
+                    eprintln!(
+                        "{}: {}/{} files, {} chunks",
+                        last["phase"].as_str().unwrap_or("indexing"),
+                        last["indexed"].as_u64().unwrap_or(0),
+                        last["total"].as_u64().unwrap_or(0),
+                        last["chunks"].as_u64().unwrap_or(0),
+                    );
+                }
+                if last["phase"] == "done" {
+                    break;
+                }
+            }
+            let join = handle.join().map_err(|_| anyhow::anyhow!("Reindex thread panicked"))?;
+            join?;
+            print_output(&last, as_json)?;
+        }
+        Commands::Backfill => {
+            let db = Arc::new(Mutex::new(Database::open(&config.db_path)?));
+            let model_id = &config.model_id;
+            let model_cache = &config.model_cache_dir;
+            let embedder = rindex::embedding::Embedder::load(
+                model_cache,
+                model_id,
+                Some("https://hf-mirror.com"),
+            )?;
+            eprintln!("Model loaded, backfilling missing embeddings...");
+            rindex::indexer::backfill_embeddings(&db, &embedder, true)?;
+            let out = serde_json::json!({"backfill": "complete"});
+            print_output(&out, as_json)?;
+        }
+        Commands::Setup => {
+            use std::io::Write;
+            let cwd = std::env::current_dir()?;
+            let bin = std::env::current_exe()?;
+            let bin_str = bin.to_string_lossy().replace('\\', "\\\\");
+
+            // 1. Write .mcp.json
+            let mcp_config = serde_json::json!({
+                "mcpServers": {
+                    "rindex": {
+                        "command": bin_str,
+                        "args": ["--path", cwd.to_string_lossy()]
+                    }
+                }
+            });
+            let mcp_path = cwd.join(".mcp.json");
+            let mut f = std::fs::File::create(&mcp_path)?;
+            f.write_all(serde_json::to_string_pretty(&mcp_config)?.as_bytes())?;
+            eprintln!(".mcp.json written");
+
+            // 2. Write SKILL.md (embedded at compile time)
+            let skill_dir = cwd.join(".claude").join("skills").join("rindex");
+            std::fs::create_dir_all(&skill_dir)?;
+            let skill_md = include_str!("../../plugin/skills/rindex/SKILL.md");
+            std::fs::write(skill_dir.join("SKILL.md"), skill_md)?;
+            eprintln!("SKILL.md → .claude/skills/rindex/");
+
+            // 3. Create .llm-index-ignore if missing
+            let ignore_path = cwd.join(".llm-index-ignore");
+            if !ignore_path.exists() {
+                std::fs::write(&ignore_path, "# Add patterns to exclude from rindex (one per line)\n# These work like .gitignore\n")?;
+                eprintln!(".llm-index-ignore created");
+            }
+
+            let out = serde_json::json!({"setup": "ok", "project": cwd.to_string_lossy()});
+            print_output(&out, as_json)?;
         }
     }
 
