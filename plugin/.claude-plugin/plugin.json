@@ -1,0 +1,9 @@
+{
+  "name": "rindex",
+  "description": "Local semantic code index with cross-session memory. Provides semantic search, symbol lookup, related-code discovery, and persistent project knowledge — all running locally with no cloud dependency.",
+  "author": {
+    "name": "rindex"
+  },
+  "homepage": "https://github.com/bundy-work/llm-file-index",
+  "version": "1.0.0"
+}

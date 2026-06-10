@@ -44,9 +44,26 @@ pub fn run(conn: &Connection) -> Result<()> {
             source TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_root TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'note',
+            content TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
         CREATE INDEX IF NOT EXISTS idx_chunks_name ON chunks(name);
         CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
+        CREATE INDEX IF NOT EXISTS idx_observations_project ON observations(project_root);
+        CREATE INDEX IF NOT EXISTS idx_observations_time ON observations(created_at);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            content,
+            name,
+            file_path,
+            tokenize='porter unicode61'
+        );
         "
     )?;
     Ok(())

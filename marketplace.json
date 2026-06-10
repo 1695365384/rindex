@@ -1,0 +1,11 @@
+{
+  "name": "rindex-marketplace",
+  "description": "rindex — local semantic code index for Claude Code",
+  "plugins": [
+    {
+      "name": "rindex",
+      "path": "plugin",
+      "description": "Local semantic code index with cross-session memory"
+    }
+  ]
+}

@@ -1,9 +1,11 @@
 {
   "mcpServers": {
     "rindex": {
-      "command": "rindex",
-      "args": [],
-      "env": {}
+      "command": "C:\\Users\\bundy\\work\\llm-file-index\\rindex\\target\\release\\rindex.exe",
+      "args": ["--path", "C:\\Users\\bundy\\work\\llm-file-index"],
+      "env": {
+        "HF_ENDPOINT": "https://hf-mirror.com"
+      }
     }
   }
 }
