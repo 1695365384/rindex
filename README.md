@@ -10,6 +10,7 @@
 
 > Local code index & semantic search engine for LLM coding agents.
 > Stop grepping. Start understanding.
+> 为你的钱包保驾护航。
 
 **rindex** indexes your entire project on disk and serves code search via MCP (Model Context Protocol). It lets Claude Code find functions, types, and related code in **1-2 tool calls** instead of 5-7 rounds of grep + file reading.
 
@@ -17,26 +18,59 @@
 
 ## Core Value
 
-### Your context window is your most expensive resource
+### Your context window and tool-call budget are your most expensive resources
 
-Claude Code's context window is 200K tokens. Sounds like a lot, but a single grep returns ~3,000 tokens of noise — **20 searches burn through 30% of your context with useless information**. Claude isn't understanding your code; it's sifting through garbage.
+Claude Code's context window is 200K tokens. Sounds like a lot, but a single grep can return ~3,000 tokens of noise. In real coding sessions, teams often search far more than 20 times per day.
 
-rindex compresses each search response from ~3,000 tokens to ~70 tokens. **The freed space goes where it matters: Claude understanding your business logic, tracking bug root causes, generating correct code.**
+rindex compresses each search response from ~3,000 tokens to ~70 tokens and reduces search workflow calls from 5-7 to 1-2. **That saves both token budget and plan-call budget.**
 
-### Do the math
+### Do the math (20 / 50 / 100 searches per day)
 
 | | Grep/Glob | rindex | Savings |
 |:---|---:|---:|---:|
-| **Calls per search** | 5 – 7 | 1 – 2 | **~70%** |
-| **Response tokens per search** | ~3,000 | ~70 | **~98%** |
-| **Daily 20 searches** | ~60,000 tok / 140 calls | ~1,400 tok / 40 calls | **58,600 tokens** |
-| **Daily cost (Claude Opus)** | ~$0.90 | ~$0.02 | **$0.88/day** |
-| **Monthly cost (individual)** | ~$19.80 | ~$0.44 | **$19/month** |
-| **Monthly cost (5-person team)** | ~$99 | ~$2.20 | **$97/month** |
-| **Monthly cost (20-person team)** | ~$396 | ~$8.80 | **$387/month** |
+| **Calls per search** | 5 – 7 | 1 – 2 | **~70% fewer calls** |
+| **Response tokens per search** | ~3,000 | ~70 | **~98% fewer tokens** |
+| **Daily 20 searches (light)** | ~60,000 tok / 140 calls | ~1,400 tok / 40 calls | **58,600 tok + 100 calls** |
+| **Daily 50 searches (active)** | ~150,000 tok / 350 calls | ~3,500 tok / 100 calls | **146,500 tok + 250 calls** |
+| **Daily 100 searches (heavy)** | ~300,000 tok / 700 calls | ~7,000 tok / 200 calls | **293,000 tok + 500 calls** |
 | **Wait time per search** | 5 – 7 round trips | 1 – 2 round trips | **3-5× faster** |
 
-> **A 5-person team saves $97/month, $1,164/year.** And that's before counting the higher-quality code Claude produces with a cleaner context — one fewer bug-fix round pays for itself.
+### What this means in dollars (Claude Opus token pricing)
+
+Assumption: input token price = **$15 / 1M tokens**.
+
+| Workload | Daily token savings | Daily $ saved | Monthly $ saved (22 workdays) | Yearly $ saved |
+|:---|---:|---:|---:|---:|
+| **20 searches/day** | 58,600 tok | **$0.88/day** | **$19.34/month** | **$232/year** |
+| **50 searches/day** | 146,500 tok | **$2.20/day** | **$48.35/month** | **$580/year** |
+| **100 searches/day** | 293,000 tok | **$4.40/day** | **$96.69/month** | **$1,160/year** |
+
+| Team scenario | Monthly token savings | Monthly $ saved | Yearly $ saved |
+|:---|---:|---:|---:|
+| **5 devs, 50 searches/day each** | 16.12M tok | **$241.75/month** | **$2,901/year** |
+| **20 devs, 100 searches/day each** | 129.0M tok | **$1,933.80/month** | **$23,206/year** |
+
+### If your coding plan bills per tool call
+
+Saved calls are also money saved:
+
+| Workload | Calls saved per day | Calls saved per month (22 days) |
+|:---|---:|---:|
+| **20 searches/day** | 100 | 2,200 |
+| **50 searches/day** | 250 | 5,500 |
+| **100 searches/day** | 500 | 11,000 |
+
+Formula: **monthly call-cost savings = saved calls per month x your per-call price**.
+
+Example at **$0.002 per call**:
+
+| Workload | Extra $ saved from call billing |
+|:---|---:|
+| **20 searches/day** | **$4.40/month** |
+| **50 searches/day** | **$11.00/month** |
+| **100 searches/day** | **$22.00/month** |
+
+> Total economic impact = token savings + call-billing savings.
 
 ### Performance Benchmarks
 
