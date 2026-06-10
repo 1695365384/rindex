@@ -6,6 +6,8 @@
 
 # rindex
 
+[English](README.md) | [简体中文](README_zh.md)
+
 > Local code index & semantic search engine for LLM coding agents.
 > Stop grepping. Start understanding.
 
