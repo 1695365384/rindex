@@ -5,18 +5,14 @@ use rindex::mcp::{AppState, McpServerHandler};
 use rindex::watcher;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use dirs;
 use rmcp::service::ServiceExt;
-use std::path::PathBuf;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Parser)]
 #[command(name = "rindex", version, about = "Local file index MCP server and CLI")]
 struct Cli {
-    /// Project root path (defaults to current directory)
-    #[arg(short = 'p', long = "path")]
-    path: Option<PathBuf>,
-
     /// Output JSON for CLI subcommands where applicable
     #[arg(long, global = true)]
     json: bool,
@@ -77,8 +73,15 @@ enum Commands {
     Reindex,
     /// Backfill embeddings for chunks missing them
     Backfill,
-    /// One-click setup: configures .mcp.json + copies skill file for Claude Code
-    Setup,
+    /// Multi-agent setup: register MCP for Claude Code, opencode, and/or Cursor
+    Setup {
+        #[arg(long, default_value_t = false)]
+        claude: bool,
+        #[arg(long, default_value_t = false)]
+        opencode: bool,
+        #[arg(long, default_value_t = false)]
+        cursor: bool,
+    },
 }
 
 /// Load the embedding model for CLI commands (search, related, etc.).
@@ -104,11 +107,6 @@ fn load_embedder_for_cli(config: &Config) -> Option<rindex::embedding::Embedder>
 async fn main() -> Result<()> {
     // Parse CLI before initializing tracing (so --help and --version don't log)
     let cli = Cli::parse();
-    if let Some(path) = &cli.path {
-        std::env::set_current_dir(path)
-            .with_context(|| format!("Failed to switch to project path: {:?}", path))?;
-    }
-
     let config = Config::load()
         .context("Failed to load configuration")?;
 
@@ -173,10 +171,6 @@ async fn main() -> Result<()> {
 
     // ── Auto-setup: detect coding agent & configure ──
     {
-        use std::io::Write;
-        let bin = std::env::current_exe().ok();
-        let bin_str = bin.as_ref().map(|b| b.to_string_lossy().to_string()).unwrap_or_else(|| "rindex".into());
-
         // Claude Code skill (always install, clients ignore unused files)
         let skill_dir = root_path.join(".claude").join("skills").join("rindex");
         let skill_path = skill_dir.join("SKILL.md");
@@ -184,34 +178,6 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&skill_dir).ok();
             std::fs::write(&skill_path, include_str!("../../plugin/skills/rindex/SKILL.md")).ok();
             tracing::info!("skill → .claude/skills/rindex/");
-        }
-
-        // MCP config for each known client
-        let clients: &[(&str, &str)] = &[
-            (".mcp.json",              ""),
-            (".cursor/mcp.json",       ".cursor/"),
-            (".windsurf/mcp.json",     ".windsurf/"),
-        ];
-
-        let mcp_config = serde_json::json!({
-            "mcpServers": {
-                "rindex": {
-                    "command": &bin_str,
-                    "args": ["--path", &root_str]
-                }
-            }
-        });
-        let config_json = serde_json::to_string_pretty(&mcp_config).unwrap();
-
-        for (path, parent) in clients {
-            let config_path = root_path.join(path);
-            if !config_path.exists() {
-                std::fs::create_dir_all(root_path.join(parent)).ok();
-                if let Ok(mut f) = std::fs::File::create(&config_path) {
-                    f.write_all(config_json.as_bytes()).ok();
-                    tracing::info!("mcp config → {}", path);
-                }
-            }
         }
 
         // .llm-index-ignore
@@ -380,6 +346,15 @@ fn build_ignore_engine(root_path: &std::path::Path, max_file_size: u64) -> Resul
         }
     }
 
+    let llm_ignore_path = root_path.join(".llm-index-ignore");
+    if llm_ignore_path.exists() {
+        let content = std::fs::read_to_string(&llm_ignore_path)
+            .with_context(|| format!("Failed to read {:?}", llm_ignore_path))?;
+        for line in content.lines() {
+            ignore.add_gitignore_pattern(line);
+        }
+    }
+
     Ok(ignore)
 }
 
@@ -387,7 +362,7 @@ fn print_output<T: serde::Serialize>(value: &T, as_json: bool) -> Result<()> {
     if as_json {
         println!("{}", serde_json::to_string_pretty(value)?);
     } else {
-        println!("{}", serde_json::to_string_pretty(value)?);
+        println!("{}", serde_json::to_string(&value)?);
     }
     Ok(())
 }
@@ -399,7 +374,7 @@ fn run_cli(config: Config, cmd: Commands, as_json: bool) -> Result<()> {
         Commands::Status => {
             let db = Database::open(&config.db_path)?;
             let proj = rindex::db::queries::get_or_create_project(&db, &root_str)
-                .unwrap_or_default();
+                .context("Failed to get project record")?;
             let indexed_at = proj.indexed_at
                 .map(|t| t.to_string())
                 .unwrap_or_else(|| "never".to_string());
@@ -534,44 +509,145 @@ fn run_cli(config: Config, cmd: Commands, as_json: bool) -> Result<()> {
             let out = serde_json::json!({"backfill": "complete"});
             print_output(&out, as_json)?;
         }
-        Commands::Setup => {
-            use std::io::Write;
+        Commands::Setup { claude, opencode, cursor } => {
             let cwd = std::env::current_dir()?;
-            let bin = std::env::current_exe()?;
-            let bin_str = bin.to_string_lossy().replace('\\', "\\\\");
+            let bin_str = if cfg!(target_os = "windows") { "rindex.exe" } else { "rindex" };
 
-            // 1. Write .mcp.json
-            let mcp_config = serde_json::json!({
-                "mcpServers": {
-                    "rindex": {
-                        "command": bin_str,
-                        "args": ["--path", cwd.to_string_lossy()]
+            let mut agents: Vec<&str> = Vec::new();
+            if claude { agents.push("claude"); }
+            if opencode { agents.push("opencode"); }
+            if cursor { agents.push("cursor"); }
+
+            if agents.is_empty() {
+                // No flags: project-level setup only
+                let skill_dir = cwd.join(".claude").join("skills").join("rindex");
+                std::fs::create_dir_all(&skill_dir)?;
+                let skill_md = include_str!("../../plugin/skills/rindex/SKILL.md");
+                std::fs::write(skill_dir.join("SKILL.md"), skill_md)?;
+                eprintln!("SKILL.md → .claude/skills/rindex/");
+
+                let ignore_path = cwd.join(".llm-index-ignore");
+                if !ignore_path.exists() {
+                    std::fs::write(&ignore_path, "# Add patterns to exclude from rindex (one per line)\n# These work like .gitignore\n")?;
+                    eprintln!(".llm-index-ignore created");
+                }
+            } else {
+                // User-level MCP registration for each requested agent
+                for agent in &agents {
+                    match *agent {
+                        "claude" => setup_claude_mcp(&bin_str)?,
+                        "opencode" => setup_opencode_mcp(&bin_str)?,
+                        "cursor" => setup_cursor_mcp(&bin_str)?,
+                        _ => {}
                     }
                 }
-            });
-            let mcp_path = cwd.join(".mcp.json");
-            let mut f = std::fs::File::create(&mcp_path)?;
-            f.write_all(serde_json::to_string_pretty(&mcp_config)?.as_bytes())?;
-            eprintln!(".mcp.json written");
 
-            // 2. Write SKILL.md (embedded at compile time)
-            let skill_dir = cwd.join(".claude").join("skills").join("rindex");
-            std::fs::create_dir_all(&skill_dir)?;
-            let skill_md = include_str!("../../plugin/skills/rindex/SKILL.md");
-            std::fs::write(skill_dir.join("SKILL.md"), skill_md)?;
-            eprintln!("SKILL.md → .claude/skills/rindex/");
+                // Also install project-level skill so the agent can use it immediately
+                let skill_dir = cwd.join(".claude").join("skills").join("rindex");
+                std::fs::create_dir_all(&skill_dir)?;
+                let skill_md = include_str!("../../plugin/skills/rindex/SKILL.md");
+                std::fs::write(skill_dir.join("SKILL.md"), skill_md)?;
+                eprintln!("SKILL.md → .claude/skills/rindex/");
 
-            // 3. Create .llm-index-ignore if missing
-            let ignore_path = cwd.join(".llm-index-ignore");
-            if !ignore_path.exists() {
-                std::fs::write(&ignore_path, "# Add patterns to exclude from rindex (one per line)\n# These work like .gitignore\n")?;
-                eprintln!(".llm-index-ignore created");
+                let ignore_path = cwd.join(".llm-index-ignore");
+                if !ignore_path.exists() {
+                    std::fs::write(&ignore_path, "# Add patterns to exclude from rindex (one per line)\n# These work like .gitignore\n")?;
+                    eprintln!(".llm-index-ignore created");
+                }
             }
 
-            let out = serde_json::json!({"setup": "ok", "project": cwd.to_string_lossy()});
-            print_output(&out, as_json)?;
+            let out = serde_json::json!({"setup": "ok", "project": cwd.to_string_lossy(), "agents": agents});
+             print_output(&out, as_json)?;
         }
     }
 
+    Ok(())
+}
+
+fn setup_claude_mcp(bin_str: &str) -> Result<()> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+    let config_path = home.join(".claude.json");
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    config.as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!(".claude.json is not an object"))?
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("mcpServers is not an object"))?
+        .insert("rindex".to_string(), serde_json::json!({
+            "command": bin_str
+        }));
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    eprintln!("Claude Code MCP → ~/.claude.json");
+    Ok(())
+}
+
+fn setup_opencode_mcp(bin_str: &str) -> Result<()> {
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot find config directory"))?;
+    let config_path = config_dir.join("opencode").join("opencode.jsonc");
+    std::fs::create_dir_all(config_path.parent().unwrap())?;
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    config.as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("opencode.jsonc is not an object"))?
+        .entry("mcp")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("mcp is not an object"))?
+        .insert("rindex".to_string(), serde_json::json!({
+            "type": "local",
+            "command": bin_str,
+            "enabled": true
+        }));
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    eprintln!("opencode MCP → {}", config_path.display());
+    Ok(())
+}
+
+fn setup_cursor_mcp(bin_str: &str) -> Result<()> {
+    let config_path = if cfg!(target_os = "windows") {
+        let appdata = std::env::var("APPDATA")
+            .map_err(|_| anyhow::anyhow!("APPDATA not set"))?;
+        std::path::PathBuf::from(&appdata)
+            .join("Cursor")
+            .join("User")
+            .join("globalStorage")
+            .join("saoudrizwan.claude-dev")
+            .join("settings")
+            .join("cline_mcp_settings.json")
+    } else {
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+        home.join(".cursor")
+            .join("mcp.json")
+    };
+    std::fs::create_dir_all(config_path.parent().unwrap())?;
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    config.as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("cline_mcp_settings.json is not an object"))?
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("mcpServers is not an object"))?
+        .insert("rindex".to_string(), serde_json::json!({
+            "command": bin_str
+        }));
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    eprintln!("Cursor MCP → {}", config_path.display());
     Ok(())
 }

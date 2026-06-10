@@ -124,7 +124,7 @@ pub fn process_changes(
         }
 
         // Determine language from extension
-        let language = ext_to_language(&ext);
+        let language = crate::indexer::walker::ext_to_language(&ext);
 
         let entry = FileEntry {
             path: path.to_path_buf(),
@@ -229,20 +229,4 @@ fn rebuild_ignore_engine(root: &Path) -> IgnoreEngine {
     }
 
     engine
-}
-
-fn ext_to_language(ext: &str) -> String {
-    match ext {
-        "rs" => "rust", "py" => "python",
-        "js" | "jsx" => "javascript", "ts" | "tsx" => "typescript",
-        "go" => "go", "c" | "h" => "c", "cpp" | "hpp" | "cc" => "cpp",
-        "java" => "java", "kt" | "kts" => "kotlin", "swift" => "swift",
-        "rb" => "ruby", "php" => "php", "pl" | "pm" => "perl",
-        "lua" => "lua", "toml" => "toml", "json" => "json",
-        "yaml" | "yml" => "yaml", "md" => "markdown", "html" => "html",
-        "css" => "css", "sh" | "bash" => "shell", "sql" => "sql",
-        "vue" => "vue", "svelte" => "svelte", "dockerfile" => "dockerfile",
-        "gradle" => "gradle",
-        _ => ext,
-    }.to_string()
 }

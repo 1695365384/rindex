@@ -203,7 +203,7 @@ impl<'a> Searcher<'a> {
 
     /// Search symbol without cache lookup (includes file path and content matching)
     fn search_symbol_uncached(&self, name: &str, chunk_type: Option<&str>) -> Result<Vec<SearchResult>> {
-        let conn = self.db.conn()?;
+        let conn = self.db.conn();
         let like_pattern = format!("%{}%", name);
 
         // Search across name, file_path, and content; boost recent files
@@ -303,7 +303,7 @@ impl<'a> Searcher<'a> {
         line: Option<i64>,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
-        let conn = self.db.conn()?;
+        let conn = self.db.conn();
 
         // Step 1: Locate the source chunk and its embedding
         let source = if let Some(n) = name {
@@ -378,7 +378,7 @@ impl<'a> Searcher<'a> {
              FROM chunks c
              WHERE c.id != ?1
                AND c.embedding IS NOT NULL
-             ORDER BY c.id
+             ORDER BY RANDOM()
              LIMIT ?2"
         )?;
 
@@ -441,7 +441,7 @@ impl<'a> Searcher<'a> {
             None => return self.search_symbol(query, None),
         };
 
-        let conn = self.db.conn()?;
+        let conn = self.db.conn();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
         let recent_threshold = now - 86400;

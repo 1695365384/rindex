@@ -28,13 +28,38 @@ pub struct Config {
 }
 
 impl Config {
+    /// Detect project root using (in order):
+    ///   1. CLAUDE_PROJECT_DIR env var (set by Claude Code)
+    ///   2. Walk up from CWD looking for project markers (.git, package.json, etc.)
+    ///   3. Fall back to CWD
+    pub fn detect_project_root() -> PathBuf {
+        if let Ok(dir) = std::env::var("CLAUDE_PROJECT_DIR") {
+            let p = PathBuf::from(dir);
+            if p.is_dir() {
+                return p;
+            }
+        }
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut current: &std::path::Path = cwd.as_ref();
+
+        for _ in 0..8 {
+            let markers = [".git", "package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml"];
+            if markers.iter().any(|m| current.join(m).exists()) {
+                return current.to_path_buf();
+            }
+            current = match current.parent() {
+                Some(p) => p,
+                None => break,
+            };
+        }
+
+        cwd
+    }
+
     /// Load config from rindex.toml + env vars + defaults.
-    /// Project root is always the current working directory.
-    /// HF endpoint is hardcoded to hf-mirror.com (domestic mirror).
     pub fn load() -> Result<Self> {
-        // Project root is always CWD — zero-config MCP server
-        let project_root = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."));
+        let project_root = Self::detect_project_root();
 
         // Load config file from project root, then ~/.config/rindex/config.toml
         let config_file: ConfigFile = {

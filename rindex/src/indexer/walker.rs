@@ -3,6 +3,17 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+fn dunce_canonicalize(path: &Path) -> Result<PathBuf> {
+    let canonicalized = std::fs::canonicalize(path)?;
+    if cfg!(target_os = "windows") {
+        let s = canonicalized.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(stripped));
+        }
+    }
+    Ok(canonicalized)
+}
+
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub path: PathBuf,
@@ -12,7 +23,7 @@ pub struct FileEntry {
     pub language: String,
 }
 
-fn ext_to_language(ext: &str) -> String {
+pub fn ext_to_language(ext: &str) -> String {
     match ext {
         "rs" => "rust".to_string(), "py" => "python".to_string(),
         "js" | "jsx" => "javascript".to_string(), "ts" | "tsx" => "typescript".to_string(),
@@ -39,7 +50,7 @@ impl<'a> FileWalker<'a> {
 
     pub fn walk(&self, root: &Path) -> Result<Vec<FileEntry>> {
         let mut files = Vec::new();
-        let root_path = root.canonicalize()?;
+        let root_path = dunce_canonicalize(root)?;
 
         for entry in WalkDir::new(&root_path)
             .follow_links(false)

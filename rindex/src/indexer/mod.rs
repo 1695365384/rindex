@@ -147,11 +147,7 @@ fn count_chunks(db: &Arc<Mutex<Database>>) -> usize {
         Ok(g) => g,
         Err(_) => return 0,
     };
-    let conn = match guard.conn() {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
-    conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get::<_, i64>(0))
+    guard.conn().query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get::<_, i64>(0))
         .unwrap_or(0) as usize
 }
 
@@ -162,25 +158,25 @@ fn index_single_file(db: &Arc<Mutex<Database>>, embedder: Option<&Embedder>, ent
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
 
-    let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+    // Chunk the file and compute embeddings OUTSIDE the lock
+    let chunks = chunk_file(&content, &entry.language)?;
 
-    // Check if file changed (hash diff)
-    if let Some(existing) = queries::get_file(&db_guard, &entry.relative_path)? {
-        if existing.hash == hash {
-            return Ok(()); // No change, skip
+    // Quick hash check — only hold lock for the check
+    {
+        let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+        if let Some(existing) = queries::get_file(&db_guard, &entry.relative_path)? {
+            if existing.hash == hash {
+                return Ok(());
+            }
         }
     }
 
-    // Delete old chunks
+    // All DB writes under one lock acquisition
+    let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+
     queries::delete_chunks_for_file(&db_guard, &entry.relative_path)?;
-
-    // Chunk the file
-    let chunks = chunk_file(&content, &entry.language)?;
-
-    // Store file record
     queries::upsert_file(&db_guard, &entry.relative_path, &hash, entry.size as i64, entry.mtime as i64, &entry.language, now)?;
 
-    // Store chunks (with embeddings if model is loaded)
     for chunk in &chunks {
         let chunk_id = queries::insert_chunk(
             &db_guard, &entry.relative_path, &chunk.chunk_type,
@@ -188,7 +184,6 @@ fn index_single_file(db: &Arc<Mutex<Database>>, embedder: Option<&Embedder>, ent
             chunk.start_line as i64, chunk.end_line as i64, &chunk.content,
         )?;
 
-        // Sync to FTS5 index
         queries::insert_chunk_fts(
             &db_guard, chunk_id, &chunk.content,
             chunk.name.as_deref(), &entry.relative_path,
@@ -209,7 +204,7 @@ fn index_single_file(db: &Arc<Mutex<Database>>, embedder: Option<&Embedder>, ent
 }
 
 fn store_embedding(db: &Database, chunk_id: i64, vec: &[f32]) -> Result<()> {
-    let conn = db.conn()?;
+    let conn = db.conn();
     let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
     conn.execute("UPDATE chunks SET embedding = ?1 WHERE id = ?2", rusqlite::params![bytes, chunk_id])?;
     Ok(())
@@ -220,14 +215,13 @@ fn store_embedding(db: &Database, chunk_id: i64, vec: &[f32]) -> Result<()> {
 /// Called after the model loads lazily to fill in gaps from the initial text-only index.
 pub fn backfill_embeddings(db: &Arc<Mutex<Database>>, embedder: &Embedder, force: bool) -> Result<()> {
     let db_guard = db.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
-    let conn = db_guard.conn()?;
+    let conn = db_guard.conn();
 
     if force {
         conn.execute("UPDATE chunks SET embedding = NULL", [])?;
         tracing::info!("Cleared existing embeddings for full re-backfill");
     }
 
-    // Find all chunks without embeddings
     let mut stmt = conn.prepare(
         "SELECT id, content, name FROM chunks WHERE embedding IS NULL ORDER BY id"
     )?;

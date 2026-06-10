@@ -143,6 +143,10 @@ use crate::search::Searcher;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+fn lock_mutex<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Tracks the lifecycle of the embedding model loading process
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelLoadState {
@@ -166,7 +170,7 @@ impl AppState {
     /// Start background loading of the embedding model at startup.
     /// Does NOT block — the model loads in a background thread.
     pub fn start_model_loading(&self) {
-        *self.model_state.lock().unwrap_or_else(|e| e.into_inner()) = ModelLoadState::Loading;
+        *lock_mutex(&self.model_state) = ModelLoadState::Loading;
 
         let db = Arc::clone(&self.db);
         let embedder = Arc::clone(&self.embedder);
@@ -174,7 +178,7 @@ impl AppState {
         let cache_dir = self.config.model_cache_dir.clone();
         let model_id = self.config.model_id.clone();
 
-        std::thread::Builder::new()
+        let _ = std::thread::Builder::new()
             .name("rindex-model-loader".into())
             .spawn(move || {
                 tracing::info!("Background loading embedding model...");
@@ -187,13 +191,13 @@ impl AppState {
                             *e = Some(Arc::new(model));
                         }
 
-                        *model_state.lock().unwrap_or_else(|e| e.into_inner()) =
+                        *lock_mutex(&model_state) =
                             ModelLoadState::Ready;
 
                         // Backfill embeddings for chunks that lack them
                         tracing::info!("Backfilling embeddings for existing chunks...");
                         let result = (|| -> anyhow::Result<()> {
-                            let e = embedder.lock().unwrap_or_else(|e| e.into_inner());
+                            let e = lock_mutex(&embedder);
                             if let Some(ref emb) = *e {
                                 crate::indexer::backfill_embeddings(&db, emb, false)?;
                             }
@@ -209,20 +213,22 @@ impl AppState {
                             "Failed to load embedding model (text-only search): {}",
                             e
                         );
-                        *model_state.lock().unwrap_or_else(|e| e.into_inner()) =
+                        *lock_mutex(&model_state) =
                             ModelLoadState::Failed(e.to_string());
                     }
                 }
             })
-            .ok();
+            .map_err(|e| {
+                tracing::error!("Failed to spawn model loading thread: {}", e);
+            });
     }
 
     /// Non-blocking access to the embedder.
     /// Returns None if the model is still loading or failed to load.
     pub fn get_embedder(&self) -> Option<Arc<Embedder>> {
-        match &*self.model_state.lock().unwrap_or_else(|e| e.into_inner()) {
+        match &*lock_mutex(&self.model_state) {
             ModelLoadState::Ready => {
-                let guard = self.embedder.lock().unwrap_or_else(|e| e.into_inner());
+                let guard = lock_mutex(&self.embedder);
                 guard.as_ref().map(Arc::clone)
             }
             ModelLoadState::Failed(_) | ModelLoadState::Loading | ModelLoadState::Pending => None,
@@ -302,7 +308,7 @@ impl McpServerHandler {
                 .map_err(|e| format!("Lock error: {}", e))?;
             let root = &state.root_path;
             let proj = crate::db::queries::get_or_create_project(&db, root)
-                .unwrap_or_default();
+                .map_err(|e| format!("Failed to get project: {}", e))?;
             let indexed_at = proj.indexed_at
                 .map(|t| t.to_string())
                 .unwrap_or_else(|| "never".to_string());
@@ -313,7 +319,7 @@ impl McpServerHandler {
                 format!("{} files, {} chunks", proj.file_count, proj.chunk_count)
             };
 
-            let model_status = match &*state.model_state.lock().unwrap_or_else(|e| e.into_inner()) {
+            let model_status = match &*lock_mutex(&state.model_state) {
                 ModelLoadState::Ready => "loaded".to_string(),
                 ModelLoadState::Loading => "loading (background)".to_string(),
                 ModelLoadState::Pending => "pending".to_string(),
@@ -337,28 +343,26 @@ impl McpServerHandler {
         let root_path = self.state.root_path.clone();
         let embedder = self.state.get_embedder();
 
-        tokio::task::spawn_blocking(move || {
-            tracing::info!("Background reindex started");
-            let (handle, rx) = crate::indexer::index_project(
-                Arc::clone(&db), embedder, ignore, Path::new(&root_path), None,
-            );
-            while let Ok(progress) = rx.recv() {
-                tracing::info!("Reindex: {} ({}/{})",
-                    progress.phase, progress.indexed_files, progress.total_files);
-                if progress.phase == "done" {
-                    break;
+        std::thread::Builder::new()
+            .name("rindex-reindex".into())
+            .spawn(move || {
+                tracing::info!("Background reindex started");
+                let (handle, rx) = crate::indexer::index_project(
+                    Arc::clone(&db), embedder, ignore, Path::new(&root_path), None,
+                );
+                while let Ok(progress) = rx.recv() {
+                    tracing::info!("Reindex: {} ({}/{})",
+                        progress.phase, progress.indexed_files, progress.total_files);
+                    if progress.phase == "done" {
+                        break;
+                    }
                 }
-            }
-            let _ = handle.join();
-            tracing::info!("Background reindex complete");
+                let _ = handle.join();
+                tracing::info!("Background reindex complete");
+            })
+            .map_err(|e| format!("Failed to spawn reindex thread: {}", e))?;
 
-            Ok::<_, String>(())
-        })
-            .await
-            .map_err(|e| format!("Task join error: {}", e))?
-            .map_err(|e: String| e)?;
-
-        Ok("Reindex started in background".to_string())
+        Ok("Reindex started in background. Use project_status to monitor progress.".to_string())
     }
 
     #[tool(description = "Backfill embeddings for chunks that are missing them. Use when find_related returns empty results, or when embedding coverage is incomplete. Requires the embedding model to be loaded.")]

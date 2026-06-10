@@ -106,6 +106,7 @@ fn find_content_start(node: Node, source: &str) -> usize {
 
     // Look backwards up to 100 bytes for doc comments
     let lookback_start = if byte > 100 { byte - 100 } else { 0 };
+    let lookback_start = source.floor_char_boundary(lookback_start);
     let preceding = &source[lookback_start..byte];
     let mut doc_start = byte;
 
@@ -116,10 +117,12 @@ fn find_content_start(node: Node, source: &str) -> usize {
     for (i, line) in lines.iter().enumerate().rev() {
         let trimmed = line.trim();
         let is_doc = trimmed.starts_with("///") || trimmed.starts_with("//!")
-            || trimmed.starts_with("/**") || trimmed.starts_with("*")
-            || trimmed.starts_with("```") || trimmed.starts_with("#")
+            || trimmed.starts_with("/**") || trimmed.starts_with(" * ")
+            || trimmed.starts_with("```") || trimmed.starts_with("//")
             || trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''")
-            || trimmed.starts_with("--[[") || trimmed.starts_with("--");
+            || trimmed.starts_with("--[[") || trimmed.starts_with("--")
+            || (trimmed.starts_with("#") && (trimmed.starts_with("# ") || trimmed.starts_with("#[")))
+            || trimmed.starts_with("/*");
 
         if is_doc {
             found_doc = true;

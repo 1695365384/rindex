@@ -27,3 +27,12 @@ __pycache__/
 
 # ── Test artifacts ──
 test_*.json
+tmp_mcp_call.py
+
+# ── Local agent configs (not for sharing) ──
+.claude/
+.cursor/
+.windsurf/
+.mcp.json
+.llm-index-ignore
+rindex.toml
